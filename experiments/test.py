@@ -38,19 +38,8 @@ def main():
         print("Forward-propagating data...")
         trade_data = cleaner.forward_propagate(trade_data, TimeFrame.Minute, only_when_market_open=True)
 
-        import os
-
-        output_dir = "./etc/data"
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, "trade_data.csv")
-
-        print(f"Saving trade data to {output_path} ...")
-        trade_data.to_csv(output_path)
-
         print("Checking data...")
         checker.assert_data_clean(trade_data, timeframe=TimeFrame.Minute, contains_closed_market_data=False)
-
-
             
     except Exception as e:
         print(f"Error fetching trade data: {e}")

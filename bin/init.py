@@ -19,6 +19,14 @@ def get_venv_pip(venv_path: Path) -> Path:
         return venv_path / "bin" / "pip"
 
 
+def get_venv_site_packages(venv_path: Path) -> Path:
+    """Get the site-packages directory of the virtual environment."""
+    if sys.platform == "win32":
+        return venv_path / "Lib" / "site-packages"
+    else:
+        return venv_path / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+
+
 def create_virtual_environment():
     """Create or recreate a Python virtual environment in the project root."""
     # Get the project root directory (parent of bin folder)
@@ -63,7 +71,14 @@ def create_virtual_environment():
     except Exception as e:
         print(f"Unexpected error installing dependencies: {e}")
         sys.exit(1)
-    
+
+    # Add project root to venv's Python path so "lib" can be imported from anywhere
+    site_packages = get_venv_site_packages(venv_path)
+    site_packages.mkdir(parents=True, exist_ok=True)
+    pth_file = site_packages / "project-root.pth"
+    pth_file.write_text(str(project_root.resolve()) + "\n", encoding="utf-8")
+    print("✓ Project root added to venv (project-root.pth)")
+
     # Print activation instructions
     print(f"\nTo activate the virtual environment:")
     if sys.platform == "win32":

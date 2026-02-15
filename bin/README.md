@@ -9,7 +9,7 @@ This is the **bin** directory of the project. It contains scripts that are neede
 After cloning the repository, run **`init.py`** to initialize the project:
 
 - **Windows:**  
-  `python bin\init.py`
+  `bin\init.bat`
 
 - **macOS/Linux:**  
   `python3 bin/init.py`
