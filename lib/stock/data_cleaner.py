@@ -2,14 +2,13 @@
 Stock data cleaning utilities.
 """
 
-from functools import reduce
-
 import pandas as pd
 import pandas_market_calendars as mcal
 
 from alpaca.data.timeframe import TimeFrame
 
 from lib.utils.conversions import timeframe_to_timedelta
+from lib.utils.rth import rth_timestamps_from_schedule, to_utc
 
 
 class StockDataCleaner:
@@ -80,14 +79,8 @@ class StockDataCleaner:
         only_when_market_open: bool,
     ) -> pd.DatetimeIndex:
         """Return expected timestamps at the given timeframe from start to end."""
-        if start_ts.tz is None:
-            start_ts = start_ts.tz_localize('UTC')
-        else:
-            start_ts = start_ts.tz_convert('UTC')
-        if end_ts.tz is None:
-            end_ts = end_ts.tz_localize('UTC')
-        else:
-            end_ts = end_ts.tz_convert('UTC')
+        start_ts = to_utc(start_ts)
+        end_ts = to_utc(end_ts)
 
         delta = timeframe_to_timedelta(timeframe)
         freq = pd.Timedelta(seconds=delta.total_seconds())
@@ -96,28 +89,9 @@ class StockDataCleaner:
             schedule = self._nyse.schedule(start_date=start_ts, end_date=end_ts)
             if schedule.empty:
                 return pd.DatetimeIndex([])
-            # Build RTH bars in bulk: one date_range per session (no per-bar open_at_time).
-            out = []
-            for _, row in schedule.iterrows():
-                session_open = row['market_open']
-                session_close = row['market_close']
-                session_ts = pd.date_range(
-                    start=session_open,
-                    end=session_close,
-                    freq=freq,
-                    inclusive='both',
-                )
-                out.append(session_ts)
-            if not out:
-                return pd.DatetimeIndex([])
-            combined = reduce(lambda a, b: a.union(b), out)
-            # Convert to UTC and clip to requested range
-            if combined.tz is not None:
-                combined = combined.tz_convert('UTC')
-            else:
-                combined = combined.tz_localize('UTC')
-            mask = (combined >= start_ts) & (combined <= end_ts)
-            return combined[mask]
+            return rth_timestamps_from_schedule(
+                schedule, freq, start_ts=start_ts, end_ts=end_ts
+            )
         else:
             out = pd.date_range(
                 start=start_ts,

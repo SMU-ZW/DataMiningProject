@@ -12,14 +12,7 @@ import pandas_market_calendars as mcal
 from alpaca.data.timeframe import TimeFrame
 
 from lib.utils.conversions import timeframe_to_timedelta
-
-
-def _open_at_time_rth(nyse, schedule: pd.DataFrame, t: pd.Timestamp) -> bool:
-    """Return True if t is during NYSE regular trading hours per schedule."""
-    try:
-        return nyse.open_at_time(schedule, t, only_rth=True)
-    except ValueError:
-        return False
+from lib.utils.rth import rth_timestamps_from_schedule
 
 
 class InvalidDataException(Exception):
@@ -205,11 +198,12 @@ class StockDataChecker:
             start_date=timestamps.min(),
             end_date=timestamps.max(),
         )
-        if schedule.empty:
+        valid_rth = rth_timestamps_from_schedule(
+            schedule, pd.Timedelta(minutes=1)
+        )
+        if valid_rth.empty:
             return pd.DatetimeIndex([])
-        unique_ts = timestamps.unique()
-        keep = [t for t in unique_ts if _open_at_time_rth(nyse, schedule, t)]
-        return timestamps[timestamps.isin(keep)]
+        return timestamps[timestamps.isin(valid_rth)]
 
     @staticmethod
     def _raise_if_gaps_invalid(
@@ -247,17 +241,20 @@ class StockDataChecker:
             return []
         if len(timestamps) == 1:
             return [timestamps]
-        # Group by calendar date in exchange timezone (NYSE = Eastern)
-        groups = {}
-        for t in timestamps:
-            ts = pd.Timestamp(t)
-            if ts.tz is None:
-                ts = ts.tz_localize('UTC')
-            else:
-                ts = ts.tz_convert('UTC')
-            day = ts.tz_convert(tz).date()
-            groups.setdefault(day, []).append(ts)
-        return [np.array(sorted(groups[d])) for d in sorted(groups)]
+        # Group by calendar date in exchange timezone (vectorized)
+        ts_index = pd.DatetimeIndex(timestamps)
+        if ts_index.tz is None:
+            ts_index = ts_index.tz_localize('UTC')
+        else:
+            ts_index = ts_index.tz_convert('UTC')
+        eastern_dates = ts_index.tz_convert(tz).date
+        order = np.argsort(timestamps)
+        sorted_ts = timestamps[order]
+        sorted_dates = eastern_dates[order]
+        chunks = []
+        for _, group in pd.Series(sorted_ts).groupby(sorted_dates, sort=True):
+            chunks.append(group.values)
+        return chunks
 
     @staticmethod
     def _assert_complete_timeframe(
