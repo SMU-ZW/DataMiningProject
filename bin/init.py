@@ -58,7 +58,7 @@ def create_virtual_environment():
     # Install dependencies
     print("\nInstalling dependencies...")
     pip_path = get_venv_pip(venv_path)
-    dependencies = ["pytz", "alpaca-py", "pandas", "pandas_market_calendars", "pylint"]
+    dependencies = ["pytz", "alpaca-py", "pandas", "pandas_market_calendars", "pylint", "matplotlib"]
     
     try:
         for dep in dependencies:
