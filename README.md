@@ -7,10 +7,14 @@ Sandbox for **algorithmic trading strategies**: shared libraries for data and ex
 ## Quick start
 
 1. **Clone** the repo.
-2. **Initialize** the project (creates a virtual environment and installs dependencies):
+2. **Add your Alpaca API key** so verify and data-fetching work. Create a file `etc/private/alpaca_key.json` with your keys in either format:
+   - `{"APCA-API-KEY-ID": "your-key-id", "APCA-API-SECRET-KEY": "your-secret-key"}`
+   - or `{"api_key": "your-key-id", "secret_key": "your-secret-key"}`
+   Get keys from your [Alpaca dashboard](https://app.alpaca.markets/). The `etc/private/` folder is git-ignored so your keys are not committed. See [etc/private/README.md](etc/private/README.md).
+3. **Initialize** the project (creates a virtual environment and installs dependencies):
    - Windows: `bin\init.bat`
    - macOS/Linux: `python3 bin/init.py`
-3. **Lint and test:** from the project root, run `bin\ctl.bat verify` (Windows) or `python bin/ctl.py verify` (with venv activated).
+4. **Lint and test:** from the project root, run `bin\ctl.bat verify` (Windows) or `python bin/ctl.py verify` (with venv activated).
 
 See [bin/README.md](bin/README.md) for full details on `init.py`, `ctl.py`, and `ctl.bat`.
 
