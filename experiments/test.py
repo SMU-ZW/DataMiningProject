@@ -59,15 +59,15 @@ def _get_raw_trade_data() -> pd.DataFrame:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=365)
         trade_data = fetcher.get_historical_bars(
-            symbol="VOO",
+            symbol="SPY",
             start_date=start_date,
             end_date=end_date,
             timeframe=TimeFrame.Minute,
         )
+        print(f"Saving raw data to {data_path}...")
         _save_trade_data_to_csv(trade_data, data_path)
         print(f"Saved raw data to {data_path}.")
     return trade_data
-
 
 
 def _get_cleaned_trade_data(raw_trade_data: pd.DataFrame) -> pd.DataFrame:
