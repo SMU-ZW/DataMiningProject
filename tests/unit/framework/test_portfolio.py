@@ -5,6 +5,8 @@ Unit tests for Portfolio and Position.
 import unittest
 from datetime import datetime, timezone
 
+import pandas as pd
+
 from lib.framework.orders import Fill, OrderSide
 from lib.framework.portfolio import Portfolio, Position
 
@@ -89,12 +91,17 @@ class TestPortfolio(unittest.TestCase):
         # After buy: cash=0, position value at cost=1000
         self.assertEqual(pf.equity(), 1_000.0)
 
-    def test_equity_with_prices(self):
-        """equity(prices) uses given prices for position value."""
+    def test_equity_with_snapshot(self):
+        """equity(snapshot) uses close from snapshot for position value."""
         pf = Portfolio(cash=1_000.0)
         pf.apply_fill(Fill(order_id="o1", symbol="AAPL", side="buy", price=100.0, qty=10, timestamp=_ts(2024, 1, 15)))
+        index = pd.MultiIndex.from_arrays(
+            [["AAPL"], [pd.Timestamp("2024-01-15 14:30:00", tz="UTC")]],
+            names=["symbol", "timestamp"],
+        )
+        snapshot = pd.DataFrame({"close": [120.0]}, index=index)
         # After buy: cash=0, position 10 @ 120 = 1200
-        self.assertEqual(pf.equity(prices={"AAPL": 120.0}), 1_200.0)
+        self.assertEqual(pf.equity(snapshot), 1_200.0)
 
     def test_trade_history_records_every_fill(self):
         """trade_history contains every fill in order."""

@@ -6,6 +6,8 @@ Apply fills to update state; compute equity from current prices.
 from dataclasses import dataclass, field
 from typing import Dict, List
 
+import pandas as pd
+
 from lib.framework.orders import Fill, OrderSide
 
 
@@ -69,13 +71,26 @@ class Portfolio:
         else:
             self.positions[fill.symbol] = Position(symbol=fill.symbol, quantity=new_qty, cost_basis=new_basis)
 
-    def equity(self, prices: Dict[str, float] | None = None) -> float:
+    def equity(self, snapshot: pd.DataFrame | None = None) -> float:
         """
         Total equity: cash + sum(position value at given prices).
-        If prices is None, uses cost basis for position value (book value).
+        If snapshot is provided (DataFrame with MultiIndex symbol/timestamp and 'close' column),
+        uses close price per symbol for valuation. If snapshot is None or empty, uses cost basis (book value).
         """
         value = self.cash
-        for sym, pos in self.positions.items():
-            p = prices.get(sym, pos.avg_price) if prices is not None else pos.avg_price
-            value += pos.quantity * p
+        if snapshot is not None and not snapshot.empty and "close" in snapshot.columns:
+            if isinstance(snapshot.index, pd.MultiIndex) and "symbol" in snapshot.index.names:
+                for sym, pos in self.positions.items():
+                    try:
+                        p = float(snapshot.xs(sym, level="symbol")["close"].iloc[-1])
+                    except KeyError:
+                        p = pos.avg_price
+                    value += pos.quantity * p
+            else:
+                p = float(snapshot["close"].iloc[-1])
+                for pos in self.positions.values():
+                    value += pos.quantity * p
+        else:
+            for pos in self.positions.values():
+                value += pos.quantity * pos.avg_price
         return value

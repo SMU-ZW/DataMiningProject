@@ -18,7 +18,7 @@ Core types for sending and recording executions:
 Portfolio state and valuation:
 
 - **Position** — Single symbol: `quantity`, `cost_basis`, and `avg_price` (derived). Used for cost-basis and P&L.
-- **Portfolio** — Holds `cash`, a dict of `positions` by symbol, and `trade_history` (list of `Fill`). Call `apply_fill(fill)` to update cash and positions from broker fills (no short selling). Call `equity(prices)` for total equity; pass `prices: Dict[symbol, float]` for mark-to-market, or omit for book value (cost basis).
+- **Portfolio** — Holds `cash`, a dict of `positions` by symbol, and `trade_history` (list of `Fill`). Call `apply_fill(fill)` to update cash and positions from broker fills (no short selling). Call `equity(snapshot)` for total equity; pass a DataFrame with MultiIndex (symbol, timestamp) and `close` column for mark-to-market, or omit for book value (cost basis).
 
 ### strategy (`strategy.py`)
 
