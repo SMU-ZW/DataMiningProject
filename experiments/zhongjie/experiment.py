@@ -7,6 +7,7 @@ from sklearn.ensemble import AdaBoostClassifier, RandomForestClassifier  # type:
 from sklearn.naive_bayes import GaussianNB  # type: ignore[import-untyped]
 from sklearn.neighbors import KNeighborsClassifier  # type: ignore[import-untyped]
 from sklearn.tree import DecisionTreeClassifier  # type: ignore[import-untyped]
+from xgboost import XGBClassifier  # type: ignore[import-untyped]
 
 from alpaca.data.timeframe import TimeFrame
 
@@ -17,6 +18,7 @@ from lib.common.common import (
     add_feature_bars_since_open,
     add_feature_bars_until_close,
     add_feature_pct_change_batch,
+    calculate_min_win_rate,
     create_target_column,
     evaluate_and_print,
 )
@@ -24,17 +26,12 @@ from lib.common.common import (
 # Cache dir: etc/data under project root (experiment is in experiments/orion/)
 _CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "etc" / "data"
 
-# Target labeling + printed PnL summary (keep in sync)
-TAKE_PROFIT = 0.04
-STOP_LOSS = 0.02
-TRADE_COST = 0.004  # per-side fee/slippage
-
 
 def _cache_path(symbol: str, start_date: datetime, end_date: datetime) -> Path:
     """Path for cached cleaned data: etc/data/zhongjie_{symbol}_{start}_{end}_clean.csv"""
     start_str = start_date.strftime("%Y%m%d")
     end_str = end_date.strftime("%Y%m%d")
-    return _CACHE_DIR / f"decision-tree_{symbol}_{start_str}_{end_str}_clean.csv"
+    return _CACHE_DIR / f"zhongjie_{symbol}_{start_str}_{end_str}_clean.csv"
 
 
 def pull_and_clean(symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
@@ -73,12 +70,12 @@ def pull_and_clean(symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
     return data
 
 
-def create_training_data(data: pd.DataFrame) -> pd.DataFrame:
+def create_training_data(data: pd.DataFrame, take_profit: float, stop_loss: float) -> pd.DataFrame:
     # Column names added by create_training_data (target + features only)
     col_names = []
     col_names.append("target")
     data = create_target_column(
-        data, take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, column_name=col_names[-1]
+        data, take_profit=take_profit, stop_loss=stop_loss, column_name=col_names[-1]
     )
     col_names.append("bars_until_close")    
     data = add_feature_bars_until_close(data, column_name=col_names[-1])
@@ -183,14 +180,48 @@ def train_knn(
     return clf
 
 
+def train_xgboost(
+    data: pd.DataFrame,
+    target_column: str = "target",
+    **kwargs,
+) -> XGBClassifier:
+    """Fit an XGBoost classifier on features vs target. Returns the fitted classifier.
+
+    When ``scale_pos_weight`` is omitted, sets it to n_negative / n_positive so
+    imbalance handling is analogous to ``class_weight='balanced'`` on sklearn trees.
+    """
+    X = data.drop(columns=[target_column])
+    y = data[target_column]
+    if "scale_pos_weight" not in kwargs:
+        n_pos = int((y == 1).sum())
+        if n_pos > 0:
+            kwargs["scale_pos_weight"] = int((y == 0).sum()) / n_pos
+    clf = XGBClassifier(random_state=42, **kwargs)
+    clf.fit(X, y)
+    return clf
+
+
 if __name__ == "__main__":
-    raw_df = pull_and_clean("MARA", datetime(2022, 1, 1), datetime(2025, 12, 31))
-    training_df = create_training_data(raw_df)
+    SYMBOL = "MARA"
+    START_DATE = datetime(2022, 1, 1)
+    END_DATE = datetime(2025, 12, 31)
+    TAKE_PROFIT = 0.04
+    STOP_LOSS = 0.02
+    TRADE_COST = 0.004
+
+    print("====================== Starting Test ======================")
+    print(f"SYMBOL: {SYMBOL}")
+    print(f"Date Range: {START_DATE} to {END_DATE}")
+    print(f"Take Profit: {TAKE_PROFIT * 100}%")
+    print(f"Stop Loss: {STOP_LOSS * 100}%")
+    print(f"Trade Cost: {TRADE_COST * 100}%")
+    print(f"Break Even Win Rate (Percision): {calculate_min_win_rate(TAKE_PROFIT, STOP_LOSS, TRADE_COST) * 100}%")
+    print()
+
+    raw_df = pull_and_clean(SYMBOL, START_DATE, END_DATE)
+    training_df = create_training_data(raw_df, take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS)
     train_df, test_df = split_training_data(training_df, test_fraction=0.2)
     print(f"Train rows: {len(train_df):,}, test rows: {len(test_df):,}")
-
-    # pd.set_option('display.max_rows', None)
-    # print(train_df.corr()['target'].sort_values(ascending=False))
 
     X_train = train_df.drop(columns=["target"])
     X_test = test_df.drop(columns=["target"])
@@ -230,5 +261,13 @@ if __name__ == "__main__":
     adaboost_pred = adaboost_clf.predict(X_test)
     evaluate_and_print(
         "AdaBoost", y_test, adaboost_pred,
+        take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
+    )
+
+    # XGBoost
+    xgb_clf = train_xgboost(train_df)
+    xgb_pred = xgb_clf.predict(X_test)
+    evaluate_and_print(
+        "XGBoost", y_test, xgb_pred,
         take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
     )

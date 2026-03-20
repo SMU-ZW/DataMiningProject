@@ -66,6 +66,7 @@ def create_virtual_environment():
         "pylint",
         "matplotlib",
         "scikit-learn",
+        "xgboost",
     ]
     
     try:
