@@ -16,13 +16,15 @@ def train_decision_tree(
     param_grid: dict[str, list[Any]] | None = None,
     scoring: str = "f1",
     verbose: bool = False,
+    grid_n_jobs: int = 1,
     **kwargs: Any,
 ) -> DecisionTreeClassifier:
     """Fit a decision tree. Returns the fitted classifier.
 
     If ``param_grid`` is non-empty, fits each combo on ``train_df``, scores on ``validation_df``,
     then refits the best estimator on train+validation combined. Otherwise fits once on
-    train+validation combined with ``**kwargs`` only.
+    train+validation combined with ``**kwargs`` only. Pass ``grid_n_jobs`` to evaluate grid
+    points in parallel (see ``grid_search_refit`` in ``common``).
     """
 
     def build(params: dict[str, Any], fit_data: pd.DataFrame) -> DecisionTreeClassifier:
@@ -41,6 +43,7 @@ def train_decision_tree(
             target_column,
             scoring,
             verbose,
+            grid_n_jobs=grid_n_jobs,
         )
     combined = combine_train_val_sorted(train_df, validation_df)
     features = combined.drop(columns=[target_column])

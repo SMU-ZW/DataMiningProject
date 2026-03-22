@@ -17,6 +17,7 @@ def train_adaboost(
     param_grid: dict[str, list[Any]] | None = None,
     scoring: str = "f1",
     verbose: bool = False,
+    grid_n_jobs: int = 1,
     **kwargs: Any,
 ) -> AdaBoostClassifier:
     """Fit an AdaBoost classifier. Uses a shallow tree (max_depth=3) as default base estimator.
@@ -42,6 +43,7 @@ def train_adaboost(
             target_column,
             scoring,
             verbose,
+            grid_n_jobs=grid_n_jobs,
         )
     combined = combine_train_val_sorted(train_df, validation_df)
     features = combined.drop(columns=[target_column])

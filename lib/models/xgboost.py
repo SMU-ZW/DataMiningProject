@@ -16,6 +16,7 @@ def train_xgboost(
     param_grid: dict[str, list[Any]] | None = None,
     scoring: str = "f1",
     verbose: bool = False,
+    grid_n_jobs: int = 1,
     **kwargs: Any,
 ) -> XGBClassifier:
     """Fit an XGBoost classifier.
@@ -41,6 +42,7 @@ def train_xgboost(
             target_column,
             scoring,
             verbose,
+            grid_n_jobs=grid_n_jobs,
         )
     combined = combine_train_val_sorted(train_df, validation_df)
     features = combined.drop(columns=[target_column])

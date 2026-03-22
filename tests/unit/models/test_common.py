@@ -78,6 +78,43 @@ class TestGridSearchRefit(unittest.TestCase):
         self.assertIsInstance(out, DecisionTreeClassifier)
         self.assertTrue(hasattr(out, "predict"))
 
+    def test_parallel_matches_sequential_best_params(self):
+        train_df = tiny_classification_df(n_rows=30, seed=3)
+        val_df = tiny_classification_df(n_rows=20, seed=4)
+        new_ts = pd.date_range("2025-01-03 09:30", periods=20, freq="min", tz="UTC")
+        val_df = val_df.copy()
+        val_df.index = pd.MultiIndex.from_arrays(
+            [["X"] * 20, new_ts], names=["symbol", "timestamp"]
+        )
+
+        def build(params: dict, fit_data: pd.DataFrame) -> DecisionTreeClassifier:
+            _ = fit_data
+            md = params.get("max_depth", 2)
+            return DecisionTreeClassifier(random_state=0, max_depth=md)
+
+        grid = {"max_depth": [1, 2, 3, 4]}
+        seq = grid_search_refit(
+            build,
+            grid,
+            train_df,
+            val_df,
+            "target",
+            scoring="f1",
+            verbose=False,
+            grid_n_jobs=1,
+        )
+        par = grid_search_refit(
+            build,
+            grid,
+            train_df,
+            val_df,
+            "target",
+            scoring="f1",
+            verbose=False,
+            grid_n_jobs=4,
+        )
+        self.assertEqual(seq.get_params()["max_depth"], par.get_params()["max_depth"])
+
 
 if __name__ == "__main__":
     unittest.main()

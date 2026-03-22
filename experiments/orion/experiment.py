@@ -257,21 +257,22 @@ if __name__ == "__main__":
 
     # exit(0)
 
-    # print("\n--- Decision Tree (grid search) ---")
-    # tree_clf = train_decision_tree(
-    #     train_df,
-    #     val_df,
-    #     param_grid={
-    #         "max_depth": [8, 16, 24, None],
-    #         "min_samples_leaf": [100, 500],
-    #     },
-    #     verbose=True,
-    # )
-    # tree_pred = tree_clf.predict(X_test)
-    # evaluate_and_print(
-    #     "Decision Tree", y_test, tree_pred,
-    #     take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST
-    # )
+    print("\n--- Decision Tree (grid search) ---")
+    tree_clf = train_decision_tree(
+        train_df,
+        val_df,
+        param_grid={
+            "max_depth": [8, 16, 24, None],
+            "min_samples_leaf": [100, 500],
+        },
+        verbose=True,
+        grid_n_jobs=6,
+    )
+    tree_pred = tree_clf.predict(X_test)
+    evaluate_and_print(
+        "Decision Tree", y_test, tree_pred,
+        take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST
+    )
 
     print("\n--- Naive Bayes (grid search) ---")
     nb_clf = train_naive_bayes(
@@ -279,6 +280,7 @@ if __name__ == "__main__":
         val_df,
         param_grid={"var_smoothing": [1e-9, 1e-8, 1e-7, 1e-6]},
         verbose=True,
+        grid_n_jobs=1,  # Naive Bayes is very fast, so no need to parallelize
     )
     nb_pred = nb_clf.predict(X_test)
     evaluate_and_print(
@@ -286,67 +288,71 @@ if __name__ == "__main__":
         take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
     )
 
-    # print("\n--- K-Nearest Neighbors (grid search) ---")
-    # knn_clf = train_knn(
-    #     train_df,
-    #     val_df,
-    #     param_grid={
-    #         "n_neighbors": [5, 15, 31],
-    #         "weights": ["uniform", "distance"],
-    #         "p": [1, 2],
-    #     },
-    #     verbose=True,
-    # )
-    # knn_pred = knn_clf.predict(X_test)
-    # evaluate_and_print(
-    #     "K-Nearest Neighbors", y_test, knn_pred,
-    #     take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
-    # )
+    print("\n--- K-Nearest Neighbors (grid search) ---")
+    knn_clf = train_knn(
+        train_df,
+        val_df,
+        param_grid={
+            "n_neighbors": [5, 15, 31],
+            "weights": ["uniform", "distance"],
+            "p": [1, 2],
+        },
+        verbose=True,
+        grid_n_jobs=6,
+    )
+    knn_pred = knn_clf.predict(X_test)
+    evaluate_and_print(
+        "K-Nearest Neighbors", y_test, knn_pred,
+        take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
+    )
 
-    # print("\n--- Random Forest (grid search) ---")
-    # forest_clf = train_forest(
-    #     train_df,
-    #     val_df,
-    #     param_grid={
-    #         "n_estimators": [100, 200],
-    #         "max_depth": [12, 20, None],
-    #         "min_samples_leaf": [100, 500],
-    #     },
-    #     verbose=True,
-    # )
-    # forest_pred = forest_clf.predict(X_test)
-    # evaluate_and_print(
-    #     "Random Forest", y_test, forest_pred,
-    #     take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
-    # )
+    print("\n--- Random Forest (grid search) ---")
+    forest_clf = train_forest(
+        train_df,
+        val_df,
+        param_grid={
+            "n_estimators": [100, 200],
+            "max_depth": [12, 20, None],
+            "min_samples_leaf": [100, 500],
+        },
+        verbose=True,
+        grid_n_jobs=6,
+    )
+    forest_pred = forest_clf.predict(X_test)
+    evaluate_and_print(
+        "Random Forest", y_test, forest_pred,
+        take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
+    )
 
-    # print("\n--- AdaBoost (grid search) ---")
-    # adaboost_clf = train_adaboost(
-    #     train_df,
-    #     val_df,
-    #     param_grid={"n_estimators": [50, 100], "learning_rate": [0.5, 1.0]},
-    #     verbose=True,
-    # )
-    # adaboost_pred = adaboost_clf.predict(X_test)
-    # evaluate_and_print(
-    #     "AdaBoost", y_test, adaboost_pred,
-    #     take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
-    # )
+    print("\n--- AdaBoost (grid search) ---")
+    adaboost_clf = train_adaboost(
+        train_df,
+        val_df,
+        param_grid={"n_estimators": [50, 100], "learning_rate": [0.5, 1.0]},
+        verbose=True,
+        grid_n_jobs=6,
+    )
+    adaboost_pred = adaboost_clf.predict(X_test)
+    evaluate_and_print(
+        "AdaBoost", y_test, adaboost_pred,
+        take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
+    )
 
-    # print("\n--- XGBoost (grid search) ---")
-    # xgb_clf = train_xgboost(
-    #     train_df,
-    #     val_df,
-    #     param_grid={
-    #         "max_depth": [4, 6],
-    #         "learning_rate": [0.05, 0.1],
-    #         "n_estimators": [150, 300],
-    #         "subsample": [0.8, 1.0],
-    #     },
-    #     verbose=True,
-    # )
-    # xgb_pred = xgb_clf.predict(X_test)
-    # evaluate_and_print(
-    #     "XGBoost", y_test, xgb_pred,
-    #     take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
-    # )
+    print("\n--- XGBoost (grid search) ---")
+    xgb_clf = train_xgboost(
+        train_df,
+        val_df,
+        param_grid={
+            "max_depth": [4, 6],
+            "learning_rate": [0.05, 0.1],
+            "n_estimators": [150, 300],
+            "subsample": [0.8, 1.0],
+        },
+        verbose=True,
+        grid_n_jobs=6,
+    )
+    xgb_pred = xgb_clf.predict(X_test)
+    evaluate_and_print(
+        "XGBoost", y_test, xgb_pred,
+        take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
+    )

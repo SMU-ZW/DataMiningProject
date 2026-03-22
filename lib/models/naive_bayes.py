@@ -16,6 +16,7 @@ def train_naive_bayes(
     param_grid: dict[str, list[Any]] | None = None,
     scoring: str = "f1",
     verbose: bool = False,
+    grid_n_jobs: int = 1,
     **kwargs: Any,
 ) -> GaussianNB:
     """Fit a Gaussian Naive Bayes classifier. See ``train_decision_tree`` in ``decision_tree`` for grid search."""
@@ -33,6 +34,7 @@ def train_naive_bayes(
             target_column,
             scoring,
             verbose,
+            grid_n_jobs=grid_n_jobs,
         )
     combined = combine_train_val_sorted(train_df, validation_df)
     features = combined.drop(columns=[target_column])
