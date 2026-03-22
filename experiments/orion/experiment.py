@@ -24,6 +24,13 @@ from lib.common.common import (
     evaluate_and_print,
 )
 
+from experiments.orion.elib import (
+    add_feature_atr,
+    add_feature_close_vwap_pct_diff,
+    add_feature_day_of_week,
+    add_feature_volume_and_trade_count_zscore,
+)
+
 # Cache dir: etc/data under project root (experiment is in experiments/orion/)
 _CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "etc" / "data"
 
@@ -82,9 +89,18 @@ def create_training_data(data: pd.DataFrame, take_profit: float, stop_loss: floa
     data = add_feature_bars_until_close(data, column_name=col_names[-1])
     col_names.append("bars_since_open")
     data = add_feature_bars_since_open(data, column_name=col_names[-1])
-    pct_bars = [b for b in range(1, 360) if b < 10 or (b < 120 and b % 10 == 0) or b % 30 == 0]
-    col_names.extend(f"pct_change_{b}" for b in pct_bars)
-    data = add_feature_pct_change_batch(data, pct_bars)
+    col_names.append("close_vwap_pct_diff")
+    data = add_feature_close_vwap_pct_diff(data, column_name=col_names[-1])
+    rolling_windows = [1, 2, 3, 4, 5, 10, 20, 30, 60, 90, 120, 180]
+    col_names.extend(f"atr_{b}" for b in rolling_windows)
+    data = add_feature_atr(data, rolling_windows)
+    col_names.append("day_of_week")
+    data = add_feature_day_of_week(data, column_name=col_names[-1])
+    col_names.extend(f"volume_zscore_{w}" for w in rolling_windows)
+    col_names.extend(f"trade_count_zscore_{w}" for w in rolling_windows)
+    data = add_feature_volume_and_trade_count_zscore(data, rolling_windows)
+    col_names.extend(f"pct_change_{b}" for b in rolling_windows)
+    data = add_feature_pct_change_batch(data, rolling_windows)
     return data[col_names].copy()
 
 
@@ -221,8 +237,8 @@ if __name__ == "__main__":
     SYMBOL = "MARA"
     START_DATE = datetime(2022, 1, 1)
     END_DATE = datetime(2025, 12, 31)
-    TAKE_PROFIT = 0.04
-    STOP_LOSS = 0.02
+    TAKE_PROFIT = 0.03
+    STOP_LOSS = 0.03
     TRADE_COST = 0.004
 
     print("====================== Starting Test ======================")
@@ -232,13 +248,20 @@ if __name__ == "__main__":
     print(f"Stop Loss: {STOP_LOSS * 100}%")
     print(f"Trade Cost: {TRADE_COST * 100}%")
     print(f"Break Even Win Rate (Percision): {calculate_min_win_rate(TAKE_PROFIT, STOP_LOSS, TRADE_COST) * 100}%")
-    print()
 
     raw_df = pull_and_clean(SYMBOL, START_DATE, END_DATE)
     training_df = create_training_data(raw_df, take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS)
     train_df, test_df = split_training_data(training_df, test_fraction=0.2)
     train_df, test_df = zscore_feature_columns(train_df, test_df)
     print(f"Train rows: {len(train_df):,}, test rows: {len(test_df):,}")
+    train_pos = int((train_df['target'] == 1).sum())
+    train_total = len(train_df)
+    train_pct = 100 * train_pos / train_total if train_total else 0.0
+    print(f"Training positive ratio: {train_pos:,}/{train_total:,} ({train_pct:.2f}%)")
+    test_pos = int((test_df['target'] == 1).sum())
+    test_total = len(test_df)
+    test_pct = 100 * test_pos / test_total if test_total else 0.0
+    print(f"Test positive ratio: {test_pos:,}/{test_total:,} ({test_pct:.2f}%)")
 
     X_train = train_df.drop(columns=["target"])
     X_test = test_df.drop(columns=["target"])
@@ -247,7 +270,10 @@ if __name__ == "__main__":
     # Decision tree
     tree_clf = train_model(train_df)
     tree_pred = tree_clf.predict(X_test)
-    evaluate_and_print("Decision Tree", y_test, tree_pred)
+    evaluate_and_print(
+        "Decision Tree", y_test, tree_pred, 
+        take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST
+    )
 
     # Naive Bayes (Gaussian; features are continuous)
     nb_clf = train_naive_bayes(train_df)
