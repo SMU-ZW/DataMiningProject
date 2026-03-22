@@ -284,14 +284,14 @@ def evaluate_and_print(
     precision_pct = 100 * tp_count / pred_pos_denom if pred_pos_denom else 0.0
     loss_pct = 100 * fp_count / pred_pos_denom if pred_pos_denom else 0.0
 
-    print(f"Profitable Trades Taken (Recall): {tp_count}/{pos_denom} ({recall_pct:.2f}%)")
-    print(f"Win Rate (Precision): {tp_count}/{pred_pos_denom} ({precision_pct:.2f}%)")
-    print(f"Loss Rate: {fp_count}/{pred_pos_denom} ({loss_pct:.2f}%)")
+    print(f"Profitable Trades Taken (Recall): {tp_count:,}/{pos_denom:,} ({recall_pct:,.2f}%)")
+    print(f"Win Rate (Precision): {tp_count:,}/{pred_pos_denom:,} ({precision_pct:,.2f}%)")
+    print(f"Loss Rate: {fp_count:,}/{pred_pos_denom:,} ({loss_pct:,.2f}%)")
     win_per = take_profit - cost
     loss_per = stop_loss + cost
     print(
-        f"Profit: {100 * ((tp_count * win_per) - (fp_count * loss_per)):.2f}% "
-        f"of max possible {100 * (pos_denom * win_per):.2f}%"
+        f"Profit: {100 * ((tp_count * win_per) - (fp_count * loss_per)):,.2f}% "
+        f"of max possible {100 * (pos_denom * win_per):,.2f}%"
     )
 
 def calculate_min_win_rate(take_profit: float, stop_loss: float, cost: float) -> float:
