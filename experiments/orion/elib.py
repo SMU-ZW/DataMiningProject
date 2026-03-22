@@ -1,11 +1,28 @@
-"""Experiment-specific dataframe feature-engineering helpers (orion)."""
+"""Experiment-specific dataframe feature-engineering helpers (orion).
 
+Also includes the orion data pipeline: Alpaca fetch/cache, training table assembly,
+chronological split, z-scoring, and feature–target correlation helpers (used by
+``grid_search`` / ``feature_correlation``).
+"""
+
+from datetime import datetime
+from pathlib import Path
 from typing import Callable
 
 import numpy as np
 import pandas as pd
+from sklearn.preprocessing import StandardScaler  # type: ignore[import-untyped]
 
-from lib.common.common import _index_position, _trade_date_series
+from lib.common.common import (
+    _index_position,
+    _trade_date_series,
+    add_feature_bars_since_open,
+    add_feature_bars_until_close,
+    add_feature_pct_change_batch,
+    create_target_column,
+)
+
+from experiments.orion.config import OrionExperimentConfig
 
 
 def _rolling_zscore_1d(values: np.ndarray, window: int) -> np.ndarray:
@@ -643,3 +660,255 @@ def add_feature_close_vwap_pct_diff(
     np.divide(close - vwap, vwap, out=out, where=vwap != 0)
     data[column_name] = out
     return data
+
+
+# --- Data pipeline (fetch, training table, split, z-score) ---------------------------------
+
+_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "etc" / "data"
+
+
+def print_orion_run_preamble(
+    cfg: OrionExperimentConfig,
+    *,
+    trade_cost: float,
+    run_title: str = "Starting",
+) -> None:
+    """Print symbol, dates, costs, and break-even win rate (shared by orion scripts)."""
+    from lib.common.common import calculate_min_win_rate
+
+    print(f"====================== {run_title} ======================")
+    print(f"SYMBOL: {cfg.symbol}")
+    print(f"Reference symbols (cross-close features): {list(cfg.reference_symbols)}")
+    print(f"Date Range: {cfg.start_date} to {cfg.end_date}")
+    print(f"Take Profit: {cfg.take_profit * 100}%")
+    print(f"Stop Loss: {cfg.stop_loss * 100}%")
+    print(f"Trade Cost: {trade_cost * 100}%")
+    print(
+        "Break Even Win Rate (Percision): "
+        f"{calculate_min_win_rate(cfg.take_profit, cfg.stop_loss, trade_cost) * 100}%"
+    )
+
+
+def orion_cache_path(symbol: str, start_date: datetime, end_date: datetime) -> Path:
+    """Path for cached cleaned data: ``etc/data/orion_{symbol}_{start}_{end}_clean.csv``."""
+    start_str = start_date.strftime("%Y%m%d")
+    end_str = end_date.strftime("%Y%m%d")
+    return _CACHE_DIR / f"orion_{symbol}_{start_str}_{end_str}_clean.csv"
+
+
+def pull_and_clean(symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
+    """Fetch OHLCV for ``symbol`` in [start, end], RTH only, forward-fill gaps; use CSV cache."""
+    from alpaca.data.timeframe import TimeFrame
+
+    from lib.stock.data_cleaner import StockDataCleaner
+    from lib.stock.data_fetcher import StockDataFetcher
+
+    path = orion_cache_path(symbol, start, end)
+
+    if path.exists():
+        print(f"Loading cached data: {path.name}")
+        data = pd.read_csv(path, index_col=[0, 1], parse_dates=[1])
+        if data.index.levels[1].tz is None:
+            data.index = data.index.set_levels(
+                data.index.levels[1].tz_localize("UTC"), level=1
+            )
+        return data
+
+    fetcher = StockDataFetcher()
+    data = fetcher.get_historical_bars(
+        symbol=symbol,
+        start_date=start,
+        end_date=end,
+        timeframe=TimeFrame.Minute,
+    )
+    cleaner = StockDataCleaner()
+    data = cleaner.remove_closed_market_rows(data)
+    data = cleaner.forward_propagate(
+        data,
+        TimeFrame.Minute,
+        only_when_market_open=True,
+        mark_imputed_rows=False,
+    )
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    data.to_csv(path)
+    print(f"Cached cleaned data to {path.name}")
+    return data
+
+
+def create_orion_training_data(
+    data: pd.DataFrame,
+    take_profit: float,
+    stop_loss: float,
+    *,
+    reference_bars: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Build target + feature columns for the orion experiment schema."""
+    col_names: list[str] = []
+    col_names.append("target")
+    data = create_target_column(
+        data, take_profit=take_profit, stop_loss=stop_loss, column_name=col_names[-1]
+    )
+    col_names.append("bars_until_close")
+    data = add_feature_bars_until_close(data, column_name=col_names[-1])
+    col_names.append("bars_since_open")
+    data = add_feature_bars_since_open(data, column_name=col_names[-1])
+    col_names.append("close_vwap_pct_diff")
+    data = add_feature_close_vwap_pct_diff(data, column_name=col_names[-1])
+    rolling_windows = [2, 5, 10, 20, 30, 60, 90, 120, 180]
+    rsi_rolling_windows = [20, 40, 60, 90, 120, 180]
+    if reference_bars is not None:
+        ref_syms = symbols_in_reference_bars(reference_bars)
+        if ref_syms:
+            col_names.extend(f"close_vs_{s}_pct_diff" for s in ref_syms)
+            data = add_feature_close_vs_reference_bars_pct_diff(data, reference_bars)
+            col_names.extend(f"rsi_{s}_{b}" for s in ref_syms for b in rsi_rolling_windows)
+            data = add_feature_rsi_reference_bars(data, reference_bars, rsi_rolling_windows)
+    col_names.extend(f"atr_{b}" for b in rolling_windows)
+    data = add_feature_atr(data, rolling_windows)
+    col_names.append("day_of_week")
+    data = add_feature_day_of_week(data, column_name=col_names[-1])
+    col_names.extend(f"volume_zscore_{w}" for w in rolling_windows)
+    col_names.extend(f"trade_count_zscore_{w}" for w in rolling_windows)
+    data = add_feature_volume_and_trade_count_zscore(data, rolling_windows)
+    col_names.extend(f"pct_change_{b}" for b in rolling_windows)
+    data = add_feature_pct_change_batch(data, rolling_windows)
+    col_names.extend(f"close_sma_{b}_pct_diff" for b in rolling_windows)
+    data = add_feature_close_sma_pct_diff(data, rolling_windows)
+    col_names.extend(f"rsi_{b}" for b in rsi_rolling_windows)
+    data = add_feature_rsi(data, rsi_rolling_windows)
+    return data[col_names].copy()
+
+
+def split_training_data(
+    data: pd.DataFrame,
+    *,
+    validation_fraction: float = 0.15,
+    test_fraction: float = 0.2,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split chronologically into train, validation, then test (three contiguous blocks)."""
+    data = data.sort_index(level="timestamp")
+    n = len(data)
+    n_test = int(n * test_fraction)
+    n_val = int(n * validation_fraction)
+    n_train = n - n_val - n_test
+    if n_train < 1 or n_val < 1 or n_test < 1:
+        raise ValueError(
+            f"split_training_data: need positive train/val/test sizes; got n={n}, "
+            f"train={n_train}, val={n_val}, test={n_test}. Lower validation_fraction or "
+            "test_fraction."
+        )
+    train_df = data.iloc[:n_train]
+    val_df = data.iloc[n_train : n_train + n_val]
+    test_df = data.iloc[n_train + n_val :]
+    return train_df, val_df, test_df
+
+
+def _print_split_stats(name: str, df: pd.DataFrame, *, target_column: str = "target") -> None:
+    n = len(df)
+    if n == 0:
+        print(f"{name}: 0 rows")
+        return
+    ts = df.index.get_level_values("timestamp")
+    start, end = ts.min(), ts.max()
+    span_years = (end - start).total_seconds() / (365.25 * 24 * 60 * 60)
+    pos = int((df[target_column] == 1).sum())
+    pos_pct = 100.0 * pos / n
+    print(
+        f"{name}: {n:,} rows | {pos:,} positive ({pos_pct:.2f}%) | "
+        f"{start.strftime('%Y-%m-%d')} → {end.strftime('%Y-%m-%d')} "
+        f"({span_years:.2f} years)"
+    )
+
+
+def print_training_data_stats(
+    train_df: pd.DataFrame,
+    validation_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    *,
+    target_column: str = "target",
+) -> None:
+    """Print row counts, target balance, and calendar span for train, validation, and test."""
+    print("\n--- Train / validation / test split stats ---")
+    _print_split_stats("Train", train_df, target_column=target_column)
+    _print_split_stats("Validation", validation_df, target_column=target_column)
+    _print_split_stats("Test", test_df, target_column=target_column)
+
+
+def zscore_feature_columns(
+    train_df: pd.DataFrame,
+    validation_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    target_column: str = "target",
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Fit StandardScaler on train features only; transform train, validation, and test."""
+    feature_cols = [c for c in train_df.columns if c != target_column]
+    scaler = StandardScaler()
+    train_out = train_df.copy()
+    val_out = validation_df.copy()
+    test_out = test_df.copy()
+    train_out[feature_cols] = scaler.fit_transform(train_df[feature_cols])
+    val_out[feature_cols] = scaler.transform(validation_df[feature_cols])
+    test_out[feature_cols] = scaler.transform(test_df[feature_cols])
+    return train_out, val_out, test_out
+
+
+def load_orion_training_frames(
+    *,
+    symbol: str,
+    reference_symbols: tuple[str, ...],
+    start_date: datetime,
+    end_date: datetime,
+    take_profit: float,
+    stop_loss: float,
+    validation_fraction: float,
+    test_fraction: float,
+    print_split: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Fetch/clean, build features, split, z-score. Returns ``(train_df, val_df, test_df)``."""
+    raw_df = pull_and_clean(symbol, start_date, end_date)
+    reference_df = pd.concat(
+        [pull_and_clean(s, start_date, end_date) for s in reference_symbols],
+        axis=0,
+    ).sort_index()
+    training_df = create_orion_training_data(
+        raw_df,
+        take_profit=take_profit,
+        stop_loss=stop_loss,
+        reference_bars=reference_df,
+    )
+
+    train_df, val_df, test_df = split_training_data(
+        training_df,
+        validation_fraction=validation_fraction,
+        test_fraction=test_fraction,
+    )
+    train_df, val_df, test_df = zscore_feature_columns(train_df, val_df, test_df)
+    if print_split:
+        print_training_data_stats(train_df, val_df, test_df)
+    return train_df, val_df, test_df
+
+
+def feature_target_correlations(
+    train_df: pd.DataFrame,
+    *,
+    target_column: str = "target",
+) -> pd.Series:
+    """Pearson correlation of each feature with the target (train, z-scored features)."""
+    corr = train_df.corr(numeric_only=True)[target_column].drop(target_column, errors="ignore")
+    return corr.reindex(corr.abs().sort_values(ascending=False).index)
+
+
+def print_feature_target_correlations(
+    train_df: pd.DataFrame,
+    *,
+    target_column: str = "target",
+    top_n: int | None = None,
+) -> None:
+    """Print features sorted by absolute Pearson correlation with the target."""
+    feat_target_corr = feature_target_correlations(train_df, target_column=target_column)
+    if top_n is not None:
+        feat_target_corr = feat_target_corr.head(top_n)
+    print("\n--- Feature vs target correlation (train, Pearson) ---")
+    for feat_name, rho in feat_target_corr.items():
+        rho_str = f"{rho:.6f}" if np.isfinite(rho) else "nan"
+        print(f"  {feat_name}: {rho_str}")
