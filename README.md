@@ -27,7 +27,7 @@ See [bin/README.md](bin/README.md) for full details on `init.py`, `ctl.py`, and 
 | **[bin/](bin/)**       | Scripts: setup (`init.py` / `init.bat`) and control (`ctl.py` / `ctl.bat`) for lint and tests. |
 | **[etc/](etc/)**       | Data, configs, and private keys. Data and secrets are git-ignored. |
 | **[experiments/](experiments/)** | Custom experiments to find and explore trading strategies. |
-| **[lib/](lib/)**       | Shared libraries for data manipulation (stock data, utils) used by experiments. |
+| **[lib/](lib/)**       | Shared libraries: stock data, utilities, feature helpers (`common`), ML training (`models`), framework, and backtest. |
 | **[tests/](tests/)**   | Unit and integration tests for code in `lib`. |
 
 Each directory has its own README with more detail.

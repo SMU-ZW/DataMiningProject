@@ -7,11 +7,17 @@ import pandas as pd
 
 from experiments.orion.elib import (
     add_feature_atr,
+    add_feature_close_sma_pct_diff,
     add_feature_close_vwap_pct_diff,
+    add_feature_close_vs_reference_bars_pct_diff,
+    add_feature_close_vs_symbol_pct_diff,
     add_feature_day_of_week,
+    add_feature_rsi,
+    add_feature_rsi_reference_bars,
     add_feature_trade_count_zscore,
     add_feature_volume_and_trade_count_zscore,
     add_feature_volume_zscore,
+    symbols_in_reference_bars,
 )
 
 
@@ -132,6 +138,218 @@ def _ohlcv_vwap(symbol: str, rows):
     )
 
 
+class TestAddFeatureCloseVsSymbolPctDiff(unittest.TestCase):
+    """Tests for add_feature_close_vs_symbol_pct_diff."""
+
+    def test_pct_diff_aligned_timestamps(self):
+        df_main = _ohlc(
+            "AAPL",
+            [
+                ("2025-01-02 09:31", 100, 101, 99, 100),
+                ("2025-01-02 09:32", 100, 101, 99, 101),
+            ],
+        )
+        df_other = _ohlc(
+            "SPY",
+            [
+                ("2025-01-02 09:31", 200, 201, 199, 200),
+                ("2025-01-02 09:32", 200, 201, 199, 202),
+            ],
+        )
+        result = add_feature_close_vs_symbol_pct_diff(
+            df_main, df_other, other_symbol="SPY", column_name="cross"
+        )
+        self.assertAlmostEqual(result["cross"].iloc[0], (100 - 200) / 200)
+        self.assertAlmostEqual(result["cross"].iloc[1], (101 - 202) / 202)
+
+    def test_missing_reference_bar_is_zero(self):
+        df_main = _ohlc(
+            "AAPL",
+            [
+                ("2025-01-02 09:31", 100, 101, 99, 100),
+                ("2025-01-02 09:32", 100, 101, 99, 101),
+                ("2025-01-02 09:33", 100, 101, 99, 102),
+            ],
+        )
+        df_other = _ohlc(
+            "SPY",
+            [
+                ("2025-01-02 09:31", 200, 201, 199, 200),
+                ("2025-01-02 09:33", 200, 201, 199, 204),
+            ],
+        )
+        result = add_feature_close_vs_symbol_pct_diff(
+            df_main, df_other, other_symbol="SPY", column_name="cross"
+        )
+        self.assertAlmostEqual(result["cross"].iloc[0], (100 - 200) / 200)
+        self.assertEqual(result["cross"].iloc[1], 0.0)
+        self.assertAlmostEqual(result["cross"].iloc[2], (102 - 204) / 204)
+
+    def test_unknown_other_symbol_raises(self):
+        df_main = _ohlc("AAPL", [("2025-01-02 09:31", 100, 101, 99, 100)])
+        df_other = _ohlc("SPY", [("2025-01-02 09:31", 200, 201, 199, 200)])
+        with self.assertRaises(ValueError):
+            add_feature_close_vs_symbol_pct_diff(
+                df_main, df_other, other_symbol="QQQ", column_name="cross"
+            )
+
+
+class TestAddFeatureCloseVsReferenceBarsPctDiff(unittest.TestCase):
+    """Tests for add_feature_close_vs_reference_bars_pct_diff."""
+
+    def test_two_reference_symbols(self):
+        df_main = _ohlc(
+            "AAPL",
+            [
+                ("2025-01-02 09:31", 100, 101, 99, 100),
+                ("2025-01-02 09:32", 100, 101, 99, 101),
+            ],
+        )
+        df_spy = _ohlc(
+            "SPY",
+            [
+                ("2025-01-02 09:31", 200, 201, 199, 200),
+                ("2025-01-02 09:32", 200, 201, 199, 202),
+            ],
+        )
+        df_qqq = _ohlc(
+            "QQQ",
+            [
+                ("2025-01-02 09:31", 300, 301, 299, 300),
+                ("2025-01-02 09:32", 300, 301, 299, 303),
+            ],
+        )
+        ref = pd.concat([df_spy, df_qqq], axis=0).sort_index()
+        self.assertEqual(symbols_in_reference_bars(ref), ["QQQ", "SPY"])
+        result = add_feature_close_vs_reference_bars_pct_diff(df_main, ref)
+        self.assertIn("close_vs_SPY_pct_diff", result.columns)
+        self.assertIn("close_vs_QQQ_pct_diff", result.columns)
+        self.assertAlmostEqual(
+            result["close_vs_SPY_pct_diff"].iloc[0], (100 - 200) / 200
+        )
+        self.assertAlmostEqual(
+            result["close_vs_QQQ_pct_diff"].iloc[1], (101 - 303) / 303
+        )
+
+    def test_empty_reference_bars_returns_unchanged(self):
+        df_main = _ohlc("AAPL", [("2025-01-02 09:31", 100, 101, 99, 100)])
+        empty = pd.DataFrame(
+            columns=["open", "high", "low", "close"],
+            index=pd.MultiIndex.from_arrays([[], []], names=["symbol", "timestamp"]),
+        )
+        self.assertEqual(symbols_in_reference_bars(empty), [])
+        result = add_feature_close_vs_reference_bars_pct_diff(df_main, empty)
+        self.assertEqual(list(result.columns), list(df_main.columns))
+
+
+class TestAddFeatureRsiReferenceBars(unittest.TestCase):
+    """Tests for add_feature_rsi_reference_bars (RSI of reference symbols aligned by timestamp)."""
+
+    def test_matches_reference_symbol_rsi_when_timestamps_aligned(self):
+        rows = [
+            ("2025-01-02 09:31", 100, 101, 99, 100),
+            ("2025-01-02 09:32", 100, 101, 99, 101),
+            ("2025-01-02 09:33", 100, 102, 99, 102),
+        ]
+        df_main = _ohlc("AAPL", rows)
+        df_ref = _ohlc("SPY", rows)
+        rsi_spy = add_feature_rsi(df_ref.copy(), [2])
+        result = add_feature_rsi_reference_bars(df_main, df_ref, [2])
+        self.assertIn("rsi_SPY_2", result.columns)
+        pd.testing.assert_series_equal(
+            result["rsi_SPY_2"].reset_index(drop=True),
+            rsi_spy["rsi_2"].reset_index(drop=True),
+            check_names=False,
+        )
+
+    def test_two_reference_symbols(self):
+        rows = [
+            ("2025-01-02 09:31", 100, 101, 99, 100),
+            ("2025-01-02 09:32", 100, 101, 99, 101),
+        ]
+        df_main = _ohlc("AAPL", rows)
+        df_spy = _ohlc("SPY", rows)
+        df_qqq = _ohlc(
+            "QQQ",
+            [
+                ("2025-01-02 09:31", 300, 301, 299, 300),
+                ("2025-01-02 09:32", 300, 301, 299, 303),
+            ],
+        )
+        ref = pd.concat([df_spy, df_qqq], axis=0).sort_index()
+        result = add_feature_rsi_reference_bars(df_main, ref, [2])
+        self.assertIn("rsi_SPY_2", result.columns)
+        self.assertIn("rsi_QQQ_2", result.columns)
+        rsi_spy = add_feature_rsi(df_spy.copy(), [2])
+        rsi_qqq = add_feature_rsi(df_qqq.copy(), [2])
+        pd.testing.assert_series_equal(
+            result["rsi_SPY_2"].reset_index(drop=True),
+            rsi_spy["rsi_2"].reset_index(drop=True),
+            check_names=False,
+        )
+        pd.testing.assert_series_equal(
+            result["rsi_QQQ_2"].reset_index(drop=True),
+            rsi_qqq["rsi_2"].reset_index(drop=True),
+            check_names=False,
+        )
+
+    def test_missing_reference_timestamp_is_zero(self):
+        df_main = _ohlc(
+            "AAPL",
+            [
+                ("2025-01-02 09:31", 100, 101, 99, 100),
+                ("2025-01-02 09:32", 100, 101, 99, 101),
+                ("2025-01-02 09:33", 100, 101, 99, 102),
+            ],
+        )
+        df_ref = _ohlc(
+            "SPY",
+            [
+                ("2025-01-02 09:31", 100, 101, 99, 100),
+                ("2025-01-02 09:33", 100, 101, 99, 102),
+            ],
+        )
+        result = add_feature_rsi_reference_bars(df_main, df_ref, [2])
+        self.assertEqual(float(result["rsi_SPY_2"].iloc[1]), 0.0)
+
+    def test_empty_reference_bars_returns_unchanged(self):
+        df_main = _ohlc("AAPL", [("2025-01-02 09:31", 100, 101, 99, 100)])
+        empty = pd.DataFrame(
+            columns=["open", "high", "low", "close"],
+            index=pd.MultiIndex.from_arrays([[], []], names=["symbol", "timestamp"]),
+        )
+        result = add_feature_rsi_reference_bars(df_main, empty, [2])
+        self.assertEqual(list(result.columns), list(df_main.columns))
+
+    def test_empty_period_list_returns_unchanged(self):
+        df_main = _ohlc("AAPL", [("2025-01-02 09:31", 100, 101, 99, 100)])
+        df_ref = _ohlc("SPY", [("2025-01-02 09:31", 200, 201, 199, 200)])
+        result = add_feature_rsi_reference_bars(df_main, df_ref, [])
+        self.assertEqual(list(result.columns), list(df_main.columns))
+
+    def test_period_one_raises(self):
+        df_main = _ohlc("AAPL", [("2025-01-02 09:31", 100, 101, 99, 100)])
+        df_ref = _ohlc("SPY", [("2025-01-02 09:31", 200, 201, 199, 200)])
+        with self.assertRaises(ValueError):
+            add_feature_rsi_reference_bars(df_main, df_ref, [1])
+
+    def test_custom_column_name_fn(self):
+        rows = [
+            ("2025-01-02 09:31", 100, 101, 99, 100),
+            ("2025-01-02 09:32", 100, 101, 99, 101),
+        ]
+        df_main = _ohlc("AAPL", rows)
+        df_ref = _ohlc("SPY", rows)
+        result = add_feature_rsi_reference_bars(
+            df_main,
+            df_ref,
+            [2],
+            column_name_fn=lambda s, p: f"ref_rsi_{s}_{p}",
+        )
+        self.assertIn("ref_rsi_SPY_2", result.columns)
+        self.assertNotIn("rsi_SPY_2", result.columns)
+
+
 class TestAddFeatureCloseVwapPctDiff(unittest.TestCase):
     """Tests for add_feature_close_vwap_pct_diff."""
 
@@ -209,6 +427,170 @@ class TestAddFeatureCloseVwapPctDiff(unittest.TestCase):
         self.assertIn("feat_vwap", result.columns)
         self.assertNotIn("close_vwap_pct_diff", result.columns)
         self.assertEqual(result["feat_vwap"].iloc[0], 0.01)
+
+
+class TestAddFeatureCloseSmaPctDiff(unittest.TestCase):
+    """Tests for add_feature_close_sma_pct_diff (close vs rolling SMA percent distance)."""
+
+    def test_period_two_hand_computed(self):
+        # SMA(2): bar0 incomplete -> 0; bar1 sma=100; bar2 sma=105 -> (110-105)/105
+        df = _ohlc(
+            "AAPL",
+            [
+                ("2025-01-02 09:31", 100, 101, 99, 100),
+                ("2025-01-02 09:32", 100, 101, 99, 100),
+                ("2025-01-02 09:33", 100, 102, 99, 110),
+            ],
+        )
+        result = add_feature_close_sma_pct_diff(df, [2])
+        self.assertIn("close_sma_2_pct_diff", result.columns)
+        self.assertEqual(result["close_sma_2_pct_diff"].iloc[0], 0.0)
+        self.assertEqual(result["close_sma_2_pct_diff"].iloc[1], 0.0)
+        self.assertAlmostEqual(
+            float(result["close_sma_2_pct_diff"].iloc[2]), (110.0 - 105.0) / 105.0
+        )
+
+    def test_period_one_is_always_zero(self):
+        df = _ohlc(
+            "AAPL",
+            [
+                ("2025-01-02 09:31", 100, 101, 99, 100),
+                ("2025-01-02 09:32", 100, 101, 99, 105),
+            ],
+        )
+        result = add_feature_close_sma_pct_diff(df, [1])
+        self.assertEqual(float(result["close_sma_1_pct_diff"].iloc[0]), 0.0)
+        self.assertEqual(float(result["close_sma_1_pct_diff"].iloc[1]), 0.0)
+
+    def test_multiple_symbols_independent(self):
+        df_aapl = _ohlc(
+            "AAPL",
+            [
+                ("2025-01-02 09:31", 100, 101, 99, 100),
+                ("2025-01-02 09:32", 100, 101, 99, 110),
+            ],
+        )
+        df_googl = _ohlc(
+            "GOOGL",
+            [
+                ("2025-01-02 09:31", 50, 51, 49, 50),
+                ("2025-01-02 09:32", 50, 51, 49, 60),
+            ],
+        )
+        df = pd.concat([df_aapl, df_googl])
+        result = add_feature_close_sma_pct_diff(df, [2])
+        self.assertAlmostEqual(float(result["close_sma_2_pct_diff"].iloc[1]), (110 - 105) / 105)
+        self.assertAlmostEqual(float(result["close_sma_2_pct_diff"].iloc[3]), (60 - 55) / 55)
+
+    def test_empty_period_list_returns_unchanged(self):
+        df = _ohlc(
+            "AAPL",
+            [("2025-01-02 09:31", 100, 101, 99, 100)],
+        )
+        result = add_feature_close_sma_pct_diff(df, [])
+        self.assertEqual(list(result.columns), list(df.columns))
+
+    def test_period_zero_raises(self):
+        df = _ohlc("AAPL", [("2025-01-02 09:31", 100, 101, 99, 100)])
+        with self.assertRaises(ValueError):
+            add_feature_close_sma_pct_diff(df, [0])
+
+    def test_custom_column_name_fn(self):
+        df = _ohlc(
+            "AAPL",
+            [
+                ("2025-01-02 09:31", 100, 101, 99, 100),
+                ("2025-01-02 09:32", 100, 101, 99, 100),
+            ],
+        )
+        result = add_feature_close_sma_pct_diff(
+            df, [2], column_name_fn=lambda p: f"sma_gap_{p}"
+        )
+        self.assertIn("sma_gap_2", result.columns)
+        self.assertNotIn("close_sma_2_pct_diff", result.columns)
+
+    def test_multiple_periods_match_sequential_calls(self):
+        df = _ohlc(
+            "AAPL",
+            [
+                ("2025-01-02 09:31", 100, 101, 99, 100),
+                ("2025-01-02 09:32", 100, 101, 99, 101),
+                ("2025-01-02 09:33", 100, 102, 99, 102),
+            ],
+        )
+        single = add_feature_close_sma_pct_diff(df.copy(), [2])
+        single = add_feature_close_sma_pct_diff(single, [3])
+        batch = add_feature_close_sma_pct_diff(df.copy(), [2, 3])
+        pd.testing.assert_series_equal(
+            single["close_sma_2_pct_diff"], batch["close_sma_2_pct_diff"]
+        )
+        pd.testing.assert_series_equal(
+            single["close_sma_3_pct_diff"], batch["close_sma_3_pct_diff"]
+        )
+
+
+class TestAddFeatureRsi(unittest.TestCase):
+    """Tests for add_feature_rsi (Wilder RSI)."""
+
+    def test_monotonic_up_rsi_100_when_period_two(self):
+        # period=2: first RSI at index 2; all gains, no losses -> 100
+        df = _ohlc(
+            "AAPL",
+            [
+                ("2025-01-02 09:31", 100, 101, 99, 100),
+                ("2025-01-02 09:32", 100, 101, 99, 101),
+                ("2025-01-02 09:33", 100, 102, 99, 102),
+            ],
+        )
+        result = add_feature_rsi(df, [2])
+        self.assertIn("rsi_2", result.columns)
+        self.assertEqual(result["rsi_2"].iloc[0], 0.0)
+        self.assertEqual(result["rsi_2"].iloc[1], 0.0)
+        self.assertEqual(result["rsi_2"].iloc[2], 100.0)
+
+    def test_not_enough_bars_all_zero(self):
+        df = _ohlc(
+            "AAPL",
+            [
+                ("2025-01-02 09:31", 100, 101, 99, 100),
+                ("2025-01-02 09:32", 100, 101, 99, 101),
+            ],
+        )
+        result = add_feature_rsi(df, [14])
+        self.assertEqual(result["rsi_14"].iloc[0], 0.0)
+        self.assertEqual(result["rsi_14"].iloc[1], 0.0)
+
+    def test_multiple_periods_match_sequential_calls(self):
+        df = _ohlc(
+            "AAPL",
+            [
+                ("2025-01-02 09:31", 100, 101, 99, 100),
+                ("2025-01-02 09:32", 100, 101, 99, 101),
+                ("2025-01-02 09:33", 100, 102, 99, 102),
+            ],
+        )
+        single = add_feature_rsi(df.copy(), [2])
+        single = add_feature_rsi(single, [3])
+        batch = add_feature_rsi(df.copy(), [2, 3])
+        pd.testing.assert_series_equal(single["rsi_2"], batch["rsi_2"])
+        pd.testing.assert_series_equal(single["rsi_3"], batch["rsi_3"])
+
+    def test_empty_period_list_returns_unchanged(self):
+        df = _ohlc(
+            "AAPL",
+            [
+                ("2025-01-02 09:31", 100, 101, 99, 100),
+                ("2025-01-02 09:32", 100, 101, 99, 101),
+            ],
+        )
+        result = add_feature_rsi(df, [])
+        self.assertEqual(list(result.columns), list(df.columns))
+        pd.testing.assert_frame_equal(result[df.columns], df)
+
+    def test_period_one_raises(self):
+        df = _ohlc("AAPL", [("2025-01-02 09:31", 100, 101, 99, 100)])
+        with self.assertRaises(ValueError):
+            add_feature_rsi(df, [1])
 
 
 class TestAddFeatureAtr(unittest.TestCase):

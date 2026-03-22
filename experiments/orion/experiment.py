@@ -3,12 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import AdaBoostClassifier, RandomForestClassifier  # type: ignore[import-untyped]
-from sklearn.naive_bayes import GaussianNB  # type: ignore[import-untyped]
-from sklearn.neighbors import KNeighborsClassifier  # type: ignore[import-untyped]
 from sklearn.preprocessing import StandardScaler  # type: ignore[import-untyped]
-from sklearn.tree import DecisionTreeClassifier  # type: ignore[import-untyped]
-from xgboost import XGBClassifier  # type: ignore[import-untyped]
 
 from alpaca.data.timeframe import TimeFrame
 
@@ -24,11 +19,25 @@ from lib.common.common import (
     evaluate_and_print,
 )
 
+from lib.models import (
+    train_adaboost,
+    train_forest,
+    train_knn,
+    train_decision_tree,
+    train_naive_bayes,
+    train_xgboost,
+)
+
 from experiments.orion.elib import (
     add_feature_atr,
+    add_feature_close_sma_pct_diff,
     add_feature_close_vwap_pct_diff,
+    add_feature_close_vs_reference_bars_pct_diff,
     add_feature_day_of_week,
+    add_feature_rsi,
+    add_feature_rsi_reference_bars,
     add_feature_volume_and_trade_count_zscore,
+    symbols_in_reference_bars,
 )
 
 # Cache dir: etc/data under project root (experiment is in experiments/orion/)
@@ -78,7 +87,13 @@ def pull_and_clean(symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
     return data
 
 
-def create_training_data(data: pd.DataFrame, take_profit: float, stop_loss: float) -> pd.DataFrame:
+def create_training_data(
+    data: pd.DataFrame,
+    take_profit: float,
+    stop_loss: float,
+    *,
+    reference_bars: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     # Column names added by create_training_data (target + features only)
     col_names = []
     col_names.append("target")
@@ -91,7 +106,15 @@ def create_training_data(data: pd.DataFrame, take_profit: float, stop_loss: floa
     data = add_feature_bars_since_open(data, column_name=col_names[-1])
     col_names.append("close_vwap_pct_diff")
     data = add_feature_close_vwap_pct_diff(data, column_name=col_names[-1])
-    rolling_windows = [1, 2, 3, 4, 5, 10, 20, 30, 60, 90, 120, 180]
+    rolling_windows = [2, 5, 10, 20, 30, 60, 90, 120, 180]
+    rsi_rolling_windows = [20, 40, 60, 90, 120, 180]
+    if reference_bars is not None:
+        ref_syms = symbols_in_reference_bars(reference_bars)
+        if ref_syms:
+            col_names.extend(f"close_vs_{s}_pct_diff" for s in ref_syms)
+            data = add_feature_close_vs_reference_bars_pct_diff(data, reference_bars)
+            col_names.extend(f"rsi_{s}_{b}" for s in ref_syms for b in rsi_rolling_windows)
+            data = add_feature_rsi_reference_bars(data, reference_bars, rsi_rolling_windows)
     col_names.extend(f"atr_{b}" for b in rolling_windows)
     data = add_feature_atr(data, rolling_windows)
     col_names.append("day_of_week")
@@ -101,140 +124,91 @@ def create_training_data(data: pd.DataFrame, take_profit: float, stop_loss: floa
     data = add_feature_volume_and_trade_count_zscore(data, rolling_windows)
     col_names.extend(f"pct_change_{b}" for b in rolling_windows)
     data = add_feature_pct_change_batch(data, rolling_windows)
+    col_names.extend(f"close_sma_{b}_pct_diff" for b in rolling_windows)
+    data = add_feature_close_sma_pct_diff(data, rolling_windows)
+    col_names.extend(f"rsi_{b}" for b in rsi_rolling_windows)
+    data = add_feature_rsi(data, rsi_rolling_windows)
     return data[col_names].copy()
 
 
 def split_training_data(
     data: pd.DataFrame,
+    *,
+    validation_fraction: float = 0.15,
     test_fraction: float = 0.2,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Split into train and test by time (chronological). Last test_fraction of rows is test."""
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split chronologically into train, validation, then test (three contiguous time blocks)."""
     data = data.sort_index(level="timestamp")
     n = len(data)
-    test_size = int(n * test_fraction)
-    if test_size == 0:
-        return data, data.iloc[0:0]
-    train_df = data.iloc[: -test_size]
-    test_df = data.iloc[-test_size:]
-    return train_df, test_df
+    n_test = int(n * test_fraction)
+    n_val = int(n * validation_fraction)
+    n_train = n - n_val - n_test
+    if n_train < 1 or n_val < 1 or n_test < 1:
+        raise ValueError(
+            f"split_training_data: need positive train/val/test sizes; got n={n}, "
+            f"train={n_train}, val={n_val}, test={n_test}. Lower validation_fraction or "
+            "test_fraction."
+        )
+    train_df = data.iloc[:n_train]
+    val_df = data.iloc[n_train : n_train + n_val]
+    test_df = data.iloc[n_train + n_val :]
+    return train_df, val_df, test_df
+
+
+def _print_split_stats(name: str, df: pd.DataFrame, *, target_column: str = "target") -> None:
+    """One line: rows, positive class count/rate, timestamp range and span in years."""
+    n = len(df)
+    if n == 0:
+        print(f"{name}: 0 rows")
+        return
+    ts = df.index.get_level_values("timestamp")
+    start, end = ts.min(), ts.max()
+    span_years = (end - start).total_seconds() / (365.25 * 24 * 60 * 60)
+    pos = int((df[target_column] == 1).sum())
+    pos_pct = 100.0 * pos / n
+    print(
+        f"{name}: {n:,} rows | {pos:,} positive ({pos_pct:.2f}%) | "
+        f"{start.strftime('%Y-%m-%d')} → {end.strftime('%Y-%m-%d')} "
+        f"({span_years:.2f} years)"
+    )
+
+
+def print_training_data_stats(
+    train_df: pd.DataFrame,
+    validation_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    *,
+    target_column: str = "target",
+) -> None:
+    """Print row counts, target balance, and calendar span for train, validation, and test."""
+    print("\n--- Train / validation / test split stats ---")
+    _print_split_stats("Train", train_df, target_column=target_column)
+    _print_split_stats("Validation", validation_df, target_column=target_column)
+    _print_split_stats("Test", test_df, target_column=target_column)
 
 
 def zscore_feature_columns(
     train_df: pd.DataFrame,
+    validation_df: pd.DataFrame,
     test_df: pd.DataFrame,
     target_column: str = "target",
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Fit z-score (StandardScaler) on train features only; transform train and test."""
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Fit z-score (StandardScaler) on train features only; transform train, validation, and test."""
     feature_cols = [c for c in train_df.columns if c != target_column]
     scaler = StandardScaler()
     train_out = train_df.copy()
+    val_out = validation_df.copy()
     test_out = test_df.copy()
     train_out[feature_cols] = scaler.fit_transform(train_df[feature_cols])
+    val_out[feature_cols] = scaler.transform(validation_df[feature_cols])
     test_out[feature_cols] = scaler.transform(test_df[feature_cols])
-    return train_out, test_out
-
-
-def train_model(
-    data: pd.DataFrame,
-    target_column: str = "target",
-    **kwargs,
-) -> DecisionTreeClassifier:
-    """Fit a decision tree on features vs target. Returns the fitted classifier."""
-    X = data.drop(columns=[target_column])
-    y = data[target_column]
-    if "class_weight" not in kwargs:
-        kwargs["class_weight"] = "balanced"
-    clf = DecisionTreeClassifier(random_state=42, **kwargs)
-    clf.fit(X, y)
-    return clf
-
-
-def train_forest(
-    data: pd.DataFrame,
-    target_column: str = "target",
-    **kwargs,
-) -> RandomForestClassifier:
-    """Fit a random forest on features vs target. Returns the fitted classifier."""
-    X = data.drop(columns=[target_column])
-    y = data[target_column]
-    if "class_weight" not in kwargs:
-        kwargs["class_weight"] = "balanced"
-    clf = RandomForestClassifier(random_state=42, **kwargs)
-    clf.fit(X, y)
-    return clf
-
-
-def train_adaboost(
-    data: pd.DataFrame,
-    target_column: str = "target",
-    **kwargs,
-) -> AdaBoostClassifier:
-    """Fit an AdaBoost classifier on features vs target. Returns the fitted classifier.
-
-    Uses a shallow tree (max_depth=3) as base estimator with class_weight='balanced'
-    so the first weak learner is better than random and the ensemble can fit; a stump
-    (max_depth=1) can be worse than random on this task and cause AdaBoost to raise.
-    """
-    X = data.drop(columns=[target_column])
-    y = data[target_column]
-    if "estimator" not in kwargs:
-        kwargs["estimator"] = DecisionTreeClassifier(
-            max_depth=3, random_state=42, class_weight="balanced"
-        )
-    clf = AdaBoostClassifier(random_state=42, **kwargs)
-    clf.fit(X, y)
-    return clf
-
-
-def train_naive_bayes(
-    data: pd.DataFrame,
-    target_column: str = "target",
-    **kwargs,
-) -> GaussianNB:
-    """Fit a Gaussian Naive Bayes classifier on features vs target. Returns the fitted classifier."""
-    X = data.drop(columns=[target_column])
-    y = data[target_column]
-    clf = GaussianNB(**kwargs)
-    clf.fit(X, y)
-    return clf
-
-
-def train_knn(
-    data: pd.DataFrame,
-    target_column: str = "target",
-    **kwargs,
-) -> KNeighborsClassifier:
-    """Fit a K-Nearest Neighbors classifier on features vs target. Returns the fitted classifier."""
-    X = data.drop(columns=[target_column])
-    y = data[target_column]
-    clf = KNeighborsClassifier(**kwargs)
-    clf.fit(X, y)
-    return clf
-
-
-def train_xgboost(
-    data: pd.DataFrame,
-    target_column: str = "target",
-    **kwargs,
-) -> XGBClassifier:
-    """Fit an XGBoost classifier on features vs target. Returns the fitted classifier.
-
-    When ``scale_pos_weight`` is omitted, sets it to n_negative / n_positive so
-    imbalance handling is analogous to ``class_weight='balanced'`` on sklearn trees.
-    """
-    X = data.drop(columns=[target_column])
-    y = data[target_column]
-    if "scale_pos_weight" not in kwargs:
-        n_pos = int((y == 1).sum())
-        if n_pos > 0:
-            kwargs["scale_pos_weight"] = int((y == 0).sum()) / n_pos
-    clf = XGBClassifier(random_state=42, **kwargs)
-    clf.fit(X, y)
-    return clf
+    return train_out, val_out, test_out
 
 
 if __name__ == "__main__":
     SYMBOL = "MARA"
+    # Reference symbol(s) for cross-close features; bars are concatenated below.
+    REFERENCE_SYMBOLS = ["SPY", "IBIT", "WGMI", "CLSK", "MSTR"]
     START_DATE = datetime(2022, 1, 1)
     END_DATE = datetime(2025, 12, 31)
     TAKE_PROFIT = 0.03
@@ -243,6 +217,7 @@ if __name__ == "__main__":
 
     print("====================== Starting Test ======================")
     print(f"SYMBOL: {SYMBOL}")
+    print(f"Reference symbols (cross-close features): {REFERENCE_SYMBOLS}")
     print(f"Date Range: {START_DATE} to {END_DATE}")
     print(f"Take Profit: {TAKE_PROFIT * 100}%")
     print(f"Stop Loss: {STOP_LOSS * 100}%")
@@ -250,67 +225,128 @@ if __name__ == "__main__":
     print(f"Break Even Win Rate (Percision): {calculate_min_win_rate(TAKE_PROFIT, STOP_LOSS, TRADE_COST) * 100}%")
 
     raw_df = pull_and_clean(SYMBOL, START_DATE, END_DATE)
-    training_df = create_training_data(raw_df, take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS)
-    train_df, test_df = split_training_data(training_df, test_fraction=0.2)
-    train_df, test_df = zscore_feature_columns(train_df, test_df)
-    print(f"Train rows: {len(train_df):,}, test rows: {len(test_df):,}")
-    train_pos = int((train_df['target'] == 1).sum())
-    train_total = len(train_df)
-    train_pct = 100 * train_pos / train_total if train_total else 0.0
-    print(f"Training positive ratio: {train_pos:,}/{train_total:,} ({train_pct:.2f}%)")
-    test_pos = int((test_df['target'] == 1).sum())
-    test_total = len(test_df)
-    test_pct = 100 * test_pos / test_total if test_total else 0.0
-    print(f"Test positive ratio: {test_pos:,}/{test_total:,} ({test_pct:.2f}%)")
+    reference_df = pd.concat(
+        [pull_and_clean(s, START_DATE, END_DATE) for s in REFERENCE_SYMBOLS],
+        axis=0,
+    ).sort_index()
+    training_df = create_training_data(
+        raw_df,
+        take_profit=TAKE_PROFIT,
+        stop_loss=STOP_LOSS,
+        reference_bars=reference_df,
+    )
 
-    X_train = train_df.drop(columns=["target"])
+    train_df, val_df, test_df = split_training_data(
+        training_df, validation_fraction=0.15, test_fraction=0.2
+    )
+    train_df, val_df, test_df = zscore_feature_columns(train_df, val_df, test_df)
+    print_training_data_stats(train_df, val_df, test_df)
+
     X_test = test_df.drop(columns=["target"])
     y_test = test_df["target"]
 
-    # Decision tree
-    tree_clf = train_model(train_df)
-    tree_pred = tree_clf.predict(X_test)
-    evaluate_and_print(
-        "Decision Tree", y_test, tree_pred, 
-        take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST
-    )
+    # # Pearson correlation of each feature column with target (z-scored train features).
+    # feat_target_corr = train_df.corr(numeric_only=True)["target"].drop("target", errors="ignore")
+    # feat_target_corr = feat_target_corr.reindex(
+    #     feat_target_corr.abs().sort_values(ascending=False).index
+    # )
+    # print("\n--- Feature vs target correlation (train, Pearson) ---")
+    # for feat_name, rho in feat_target_corr.items():
+    #     rho_str = f"{rho:.6f}" if np.isfinite(rho) else "nan"
+    #     print(f"  {feat_name}: {rho_str}")
 
-    # Naive Bayes (Gaussian; features are continuous)
-    nb_clf = train_naive_bayes(train_df)
+    # exit(0)
+
+    # print("\n--- Decision Tree (grid search) ---")
+    # tree_clf = train_decision_tree(
+    #     train_df,
+    #     val_df,
+    #     param_grid={
+    #         "max_depth": [8, 16, 24, None],
+    #         "min_samples_leaf": [100, 500],
+    #     },
+    #     verbose=True,
+    # )
+    # tree_pred = tree_clf.predict(X_test)
+    # evaluate_and_print(
+    #     "Decision Tree", y_test, tree_pred,
+    #     take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST
+    # )
+
+    print("\n--- Naive Bayes (grid search) ---")
+    nb_clf = train_naive_bayes(
+        train_df,
+        val_df,
+        param_grid={"var_smoothing": [1e-9, 1e-8, 1e-7, 1e-6]},
+        verbose=True,
+    )
     nb_pred = nb_clf.predict(X_test)
     evaluate_and_print(
         "Naive Bayes", y_test, nb_pred,
         take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
     )
 
-    # K-Nearest Neighbors
-    knn_clf = train_knn(train_df)
-    knn_pred = knn_clf.predict(X_test)
-    evaluate_and_print(
-        "K-Nearest Neighbors", y_test, knn_pred,
-        take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
-    )
+    # print("\n--- K-Nearest Neighbors (grid search) ---")
+    # knn_clf = train_knn(
+    #     train_df,
+    #     val_df,
+    #     param_grid={
+    #         "n_neighbors": [5, 15, 31],
+    #         "weights": ["uniform", "distance"],
+    #         "p": [1, 2],
+    #     },
+    #     verbose=True,
+    # )
+    # knn_pred = knn_clf.predict(X_test)
+    # evaluate_and_print(
+    #     "K-Nearest Neighbors", y_test, knn_pred,
+    #     take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
+    # )
 
-    # Random forest
-    forest_clf = train_forest(train_df)
-    forest_pred = forest_clf.predict(X_test)
-    evaluate_and_print(
-        "Random Forest", y_test, forest_pred,
-        take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
-    )
+    # print("\n--- Random Forest (grid search) ---")
+    # forest_clf = train_forest(
+    #     train_df,
+    #     val_df,
+    #     param_grid={
+    #         "n_estimators": [100, 200],
+    #         "max_depth": [12, 20, None],
+    #         "min_samples_leaf": [100, 500],
+    #     },
+    #     verbose=True,
+    # )
+    # forest_pred = forest_clf.predict(X_test)
+    # evaluate_and_print(
+    #     "Random Forest", y_test, forest_pred,
+    #     take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
+    # )
 
-    # AdaBoost
-    adaboost_clf = train_adaboost(train_df)
-    adaboost_pred = adaboost_clf.predict(X_test)
-    evaluate_and_print(
-        "AdaBoost", y_test, adaboost_pred,
-        take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
-    )
+    # print("\n--- AdaBoost (grid search) ---")
+    # adaboost_clf = train_adaboost(
+    #     train_df,
+    #     val_df,
+    #     param_grid={"n_estimators": [50, 100], "learning_rate": [0.5, 1.0]},
+    #     verbose=True,
+    # )
+    # adaboost_pred = adaboost_clf.predict(X_test)
+    # evaluate_and_print(
+    #     "AdaBoost", y_test, adaboost_pred,
+    #     take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
+    # )
 
-    # XGBoost
-    xgb_clf = train_xgboost(train_df)
-    xgb_pred = xgb_clf.predict(X_test)
-    evaluate_and_print(
-        "XGBoost", y_test, xgb_pred,
-        take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
-    )
+    # print("\n--- XGBoost (grid search) ---")
+    # xgb_clf = train_xgboost(
+    #     train_df,
+    #     val_df,
+    #     param_grid={
+    #         "max_depth": [4, 6],
+    #         "learning_rate": [0.05, 0.1],
+    #         "n_estimators": [150, 300],
+    #         "subsample": [0.8, 1.0],
+    #     },
+    #     verbose=True,
+    # )
+    # xgb_pred = xgb_clf.predict(X_test)
+    # evaluate_and_print(
+    #     "XGBoost", y_test, xgb_pred,
+    #     take_profit=TAKE_PROFIT, stop_loss=STOP_LOSS, cost=TRADE_COST,
+    # )

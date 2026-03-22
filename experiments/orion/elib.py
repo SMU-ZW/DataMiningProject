@@ -226,6 +226,44 @@ def _true_range_np(high: np.ndarray, low: np.ndarray, close: np.ndarray) -> np.n
     return tr
 
 
+def _rsi_from_close(closes: np.ndarray, period: int) -> np.ndarray:
+    """
+    Wilder RSI from close prices, continuous along the array. Indices ``0 .. period-1``
+    are 0 (not enough history). First valid RSI at index ``period``.
+
+    When average loss is 0 and average gain > 0, RSI is 100; when both averages are 0,
+    RSI is 50.
+    """
+    n = len(closes)
+    out = np.zeros(n, dtype=np.float64)
+    if period < 2:
+        raise ValueError("RSI period must be >= 2")
+    if n == 0:
+        return out
+    delta = np.zeros(n, dtype=np.float64)
+    delta[1:] = closes[1:] - closes[:-1]
+    gain = np.maximum(delta, 0.0)
+    loss = np.maximum(-delta, 0.0)
+    if n < period + 1:
+        return out
+    avg_gain = np.zeros(n, dtype=np.float64)
+    avg_loss = np.zeros(n, dtype=np.float64)
+    avg_gain[period] = float(np.mean(gain[1 : period + 1]))
+    avg_loss[period] = float(np.mean(loss[1 : period + 1]))
+    for i in range(period + 1, n):
+        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss[i]) / period
+    for i in range(period, n):
+        ag = avg_gain[i]
+        al = avg_loss[i]
+        if al == 0.0:
+            out[i] = 100.0 if ag > 0 else 50.0
+        else:
+            rs = ag / al
+            out[i] = 100.0 - (100.0 / (1.0 + rs))
+    return out
+
+
 def _wilder_atr_from_tr(tr: np.ndarray, period: int) -> np.ndarray:
     """
     Wilder (smoothed) ATR from true range. Rows before the first full ATR are 0.
@@ -301,6 +339,287 @@ def add_feature_atr(
 
     new_df = pd.DataFrame(columns, index=data.index)
     return pd.concat([data, new_df], axis=1)
+
+
+def add_feature_rsi(
+    data: pd.DataFrame,
+    period_list: list[int],
+    *,
+    column_name_fn: Callable[[int], str] | None = None,
+) -> pd.DataFrame:
+    """
+    Add one or more RSI columns (Wilder smoothing on average gain / average loss).
+
+    Uses close-to-close changes in timestamp order per symbol (continuous across trading
+    days). Rows before the first valid RSI for a period are 0.
+
+    Assumes data has MultiIndex (symbol, timestamp) and a ``close`` column.
+
+    Args:
+        period_list: RSI lookback periods (e.g. ``[14]``). Each must be >= 2.
+            If empty, returns ``data`` unchanged.
+        column_name_fn: If given, ``column_name_fn(period)`` for each column; else
+            ``rsi_{period}``.
+
+    Returns:
+        ``data`` with new columns added (single concat, no fragmentation).
+    """
+    if not period_list:
+        return data
+    for p in period_list:
+        if p < 2:
+            raise ValueError("each RSI period must be >= 2")
+    name_fn = column_name_fn if column_name_fn is not None else (lambda n: f"rsi_{n}")
+    n_rows = len(data)
+    symbol = data.index.get_level_values("symbol")
+    columns = {name_fn(p): np.zeros(n_rows, dtype=np.float64) for p in period_list}
+
+    for _sym, group in data.groupby(symbol, sort=False):
+        group = group.sort_index(level="timestamp")
+        locs = group.index
+        base = _index_position(data, locs[0])
+        n = len(group)
+        close = group["close"].to_numpy(dtype=np.float64, copy=False)
+        for p in period_list:
+            rsi = _rsi_from_close(close, p)
+            columns[name_fn(p)][base : base + n] = rsi
+
+    new_df = pd.DataFrame(columns, index=data.index)
+    return pd.concat([data, new_df], axis=1)
+
+
+def add_feature_rsi_reference_bars(
+    data: pd.DataFrame,
+    reference_bars: pd.DataFrame,
+    period_list: list[int],
+    *,
+    column_name_fn: Callable[[str, int], str] | None = None,
+) -> pd.DataFrame:
+    """
+    Add Wilder RSI columns computed from each reference symbol's ``close`` (same semantics
+    as ``add_feature_rsi`` on that symbol alone), aligned to ``data`` rows by **exact**
+    timestamp match.
+
+    ``reference_bars`` uses MultiIndex ``(symbol, timestamp)``. For each reference symbol and
+    each period, RSI is computed in timestamp order on that symbol's closes (continuous across
+    days), then values are taken at ``data``'s timestamps; missing reference bars yield 0.
+
+    Assumes ``data`` has MultiIndex ``(symbol, timestamp)`` and ``reference_bars`` has
+    ``close``.
+
+    Args:
+        period_list: RSI periods (each must be >= 2). If empty, returns ``data`` unchanged.
+        column_name_fn: If given, ``column_name_fn(symbol, period)`` for each column; else
+            ``rsi_{symbol}_{period}`` (e.g. ``rsi_SPY_14``).
+
+    Returns:
+        ``data`` with new columns added (single concat, no fragmentation). If
+        ``reference_bars`` is empty or has no symbols, returns ``data`` unchanged.
+    """
+    reference_symbols = symbols_in_reference_bars(reference_bars)
+    if not reference_symbols or not period_list:
+        return data
+    for p in period_list:
+        if p < 2:
+            raise ValueError("each RSI period must be >= 2")
+    name_fn = (
+        column_name_fn
+        if column_name_fn is not None
+        else (lambda sym, period: f"rsi_{sym}_{period}")
+    )
+    n_rows = len(data)
+    ts = data.index.get_level_values("timestamp")
+    columns: dict[str, np.ndarray] = {}
+    for sym in reference_symbols:
+        for p in period_list:
+            columns[name_fn(sym, p)] = np.zeros(n_rows, dtype=np.float64)
+
+    for sym in reference_symbols:
+        ref_close = reference_bars.xs(sym, level="symbol")["close"].sort_index()
+        close_arr = ref_close.to_numpy(dtype=np.float64, copy=False)
+        for p in period_list:
+            rsi_arr = _rsi_from_close(close_arr, p)
+            rsi_series = pd.Series(rsi_arr, index=ref_close.index)
+            aligned = rsi_series.reindex(ts)
+            col = np.nan_to_num(
+                aligned.to_numpy(dtype=np.float64, copy=False),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
+            columns[name_fn(sym, p)][:] = col
+
+    new_df = pd.DataFrame(columns, index=data.index)
+    return pd.concat([data, new_df], axis=1)
+
+
+def _rolling_sma_np(close: np.ndarray, period: int) -> np.ndarray:
+    """
+    Simple moving average of ``close`` with window ``period`` (inclusive of current bar).
+    Leading indices where fewer than ``period`` samples exist are 0.
+    For ``period == 1``, equals ``close`` (every bar).
+    """
+    n = len(close)
+    out = np.zeros(n, dtype=np.float64)
+    if period < 1:
+        raise ValueError("SMA period must be >= 1")
+    if n == 0:
+        return out
+    if period == 1:
+        out[:] = close
+        return out
+    c = np.concatenate([[0.0], np.cumsum(close, dtype=np.float64)])
+    for i in range(period - 1, n):
+        out[i] = (c[i + 1] - c[i + 1 - period]) / period
+    return out
+
+
+def add_feature_close_sma_pct_diff(
+    data: pd.DataFrame,
+    period_list: list[int],
+    *,
+    column_name_fn: Callable[[int], str] | None = None,
+) -> pd.DataFrame:
+    """
+    Add one column per period: percent distance of ``close`` from its simple moving average,
+    ``(close - SMA) / SMA``, in timestamp order per symbol (continuous across trading days).
+
+    Uses the SMA of the last ``period`` closes including the current bar. Rows before a full
+    window exists are 0. Where ``SMA`` is 0 or non-finite, the value is 0 (no division).
+
+    For ``period == 1``, SMA equals ``close`` on every bar, so the percent difference is 0.
+
+    Assumes data has MultiIndex ``(symbol, timestamp)`` and a ``close`` column.
+
+    Args:
+        period_list: SMA window lengths (e.g. ``[20]`` or ``[10, 50]``). If empty, returns
+            ``data`` unchanged.
+        column_name_fn: If given, ``column_name_fn(period)`` for each column; else
+            ``close_sma_{period}_pct_diff``.
+
+    Returns:
+        ``data`` with new columns added (single concat, no fragmentation).
+    """
+    if not period_list:
+        return data
+    for p in period_list:
+        if p < 1:
+            raise ValueError("each SMA period must be >= 1")
+    name_fn = (
+        column_name_fn
+        if column_name_fn is not None
+        else (lambda n: f"close_sma_{n}_pct_diff")
+    )
+    n_rows = len(data)
+    symbol = data.index.get_level_values("symbol")
+    columns = {name_fn(p): np.zeros(n_rows, dtype=np.float64) for p in period_list}
+
+    for _sym, group in data.groupby(symbol, sort=False):
+        group = group.sort_index(level="timestamp")
+        locs = group.index
+        base = _index_position(data, locs[0])
+        n = len(group)
+        close = group["close"].to_numpy(dtype=np.float64, copy=False)
+        for p in period_list:
+            sma = _rolling_sma_np(close, p)
+            columns[name_fn(p)][base : base + n] = _pct_diff_vs_aligned_close(close, sma)
+
+    new_df = pd.DataFrame(columns, index=data.index)
+    return pd.concat([data, new_df], axis=1)
+
+
+def _pct_diff_vs_aligned_close(
+    close_main: np.ndarray,
+    close_other_aligned: np.ndarray,
+) -> np.ndarray:
+    """``(close_main - close_other) / close_other`` with safe zeros where invalid."""
+    out = np.zeros(len(close_main), dtype=np.float64)
+    valid = (
+        np.isfinite(close_other_aligned)
+        & (close_other_aligned > 0)
+        & np.isfinite(close_main)
+    )
+    out[valid] = (
+        close_main[valid] - close_other_aligned[valid]
+    ) / close_other_aligned[valid]
+    return out
+
+
+def symbols_in_reference_bars(reference_bars: pd.DataFrame) -> list[str]:
+    """
+    Sorted unique symbols in ``reference_bars`` index level ``symbol``.
+    Empty frame returns an empty list.
+    """
+    if len(reference_bars) == 0:
+        return []
+    u = pd.Index(reference_bars.index.get_level_values("symbol")).unique().sort_values()
+    return [str(x) for x in u]
+
+
+def add_feature_close_vs_reference_bars_pct_diff(
+    data: pd.DataFrame,
+    reference_bars: pd.DataFrame,
+    *,
+    column_name_fn: Callable[[str], str] | None = None,
+) -> pd.DataFrame:
+    """
+    Add one column per symbol present in ``reference_bars``: ``(close - close_ref) / close_ref``
+    at the **same timestamp**.
+
+    ``data`` is the primary symbol's frame. ``reference_bars`` uses MultiIndex
+    ``(symbol, timestamp)``; **all** symbols in that frame get a feature column. Timestamps
+    are aligned by exact match; missing reference bars or invalid closes yield 0 for that row.
+
+    Args:
+        column_name_fn: If given, ``column_name_fn(symbol)`` for each column; else
+            ``close_vs_<symbol>_pct_diff``.
+
+    Returns:
+        ``data`` with new columns added (single concat, no fragmentation). If
+        ``reference_bars`` is empty or has no symbols, returns ``data`` unchanged.
+    """
+    reference_symbols = symbols_in_reference_bars(reference_bars)
+    if not reference_symbols:
+        return data
+    name_fn = (
+        column_name_fn
+        if column_name_fn is not None
+        else (lambda sym: f"close_vs_{sym}_pct_diff")
+    )
+
+    ts = data.index.get_level_values("timestamp")
+    close_main = data["close"].to_numpy(dtype=np.float64, copy=False)
+    columns: dict[str, np.ndarray] = {}
+
+    for sym in reference_symbols:
+        other_close = reference_bars.xs(sym, level="symbol")["close"].sort_index()
+        aligned = other_close.reindex(ts)
+        close_other = aligned.to_numpy(dtype=np.float64, copy=False)
+        columns[name_fn(sym)] = _pct_diff_vs_aligned_close(close_main, close_other)
+
+    new_df = pd.DataFrame(columns, index=data.index)
+    return pd.concat([data, new_df], axis=1)
+
+
+def add_feature_close_vs_symbol_pct_diff(
+    data: pd.DataFrame,
+    other_data: pd.DataFrame,
+    *,
+    other_symbol: str,
+    column_name: str = "close_vs_other_pct_diff",
+) -> pd.DataFrame:
+    """
+    Add a single column with ``(close - close_other) / close_other`` vs one reference
+    symbol. Uses only rows for ``other_symbol`` in ``other_data`` (other symbols in the
+    frame are ignored).
+    """
+    levels = other_data.index.get_level_values("symbol")
+    if other_symbol not in levels.unique():
+        raise ValueError(f"other_data has no rows for symbol {other_symbol!r}")
+    ref_slice = other_data.loc[[other_symbol]]
+    return add_feature_close_vs_reference_bars_pct_diff(
+        data, ref_slice, column_name_fn=lambda _s: column_name
+    )
 
 
 def add_feature_close_vwap_pct_diff(
