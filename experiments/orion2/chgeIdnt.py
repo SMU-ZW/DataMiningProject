@@ -45,6 +45,7 @@ from lib.models import (
     train_forest,
     train_knn,
     train_naive_bayes,
+    train_neural_network,
     train_xgboost,
 )
 
@@ -303,47 +304,47 @@ if __name__ == "__main__":
 
     print("\n====================== Change ID — models (val grid search) ======================")
 
-    print("Training Decision Tree...")
-    tree_clf = train_decision_tree(
-        train_df,
-        val_df,
-        target_column=TARGET_COLUMN,
-        param_grid={
-            "max_depth": [8, 16, 24, None],
-            "min_samples_leaf": [100, 500],
-        },
-        scoring="f1",
-        verbose=True,
-        grid_n_jobs=4,
-    )
-    print_test_results("Decision tree", y_test, tree_clf.predict(x_test))
+    # print("Training Decision Tree...")
+    # tree_clf = train_decision_tree(
+    #     train_df,
+    #     val_df,
+    #     target_column=TARGET_COLUMN,
+    #     param_grid={
+    #         "max_depth": [8, 16, 24, None],
+    #         "min_samples_leaf": [100, 500],
+    #     },
+    #     scoring="f1",
+    #     verbose=True,
+    #     grid_n_jobs=4,
+    # )
+    # print_test_results("Decision tree", y_test, tree_clf.predict(x_test))
 
-    print("Training Naive Bayes...")
-    nb_clf = train_naive_bayes(
-        train_df,
-        val_df,
-        target_column=TARGET_COLUMN,
-        param_grid={"var_smoothing": [1e-9, 1e-8, 1e-7, 1e-6]},
-        scoring="f1",
-        verbose=True,
-        grid_n_jobs=4,
-    )
-    print_test_results("Naive Bayes", y_test, nb_clf.predict(x_test))
+    # print("Training Naive Bayes...")
+    # nb_clf = train_naive_bayes(
+    #     train_df,
+    #     val_df,
+    #     target_column=TARGET_COLUMN,
+    #     param_grid={"var_smoothing": [1e-9, 1e-8, 1e-7, 1e-6]},
+    #     scoring="f1",
+    #     verbose=True,
+    #     grid_n_jobs=4,
+    # )
+    # print_test_results("Naive Bayes", y_test, nb_clf.predict(x_test))
 
-    knn_clf = train_knn(
-        train_df,
-        val_df,
-        target_column=TARGET_COLUMN,
-        param_grid={
-            "n_neighbors": [5, 15, 31],
-            "weights": ["uniform", "distance"],
-            "p": [1, 2],
-        },
-        scoring="f1",
-        verbose=True,
-        grid_n_jobs=1,
-    )
-    print_test_results("K-nearest neighbors", y_test, knn_clf.predict(x_test))
+    # knn_clf = train_knn(
+    #     train_df,
+    #     val_df,
+    #     target_column=TARGET_COLUMN,
+    #     param_grid={
+    #         "n_neighbors": [5, 15, 31],
+    #         "weights": ["uniform", "distance"],
+    #         "p": [1, 2],
+    #     },
+    #     scoring="f1",
+    #     verbose=True,
+    #     grid_n_jobs=1,
+    # )
+    # print_test_results("K-nearest neighbors", y_test, knn_clf.predict(x_test))
 
     forest_clf = train_forest(
         train_df,
@@ -377,12 +378,29 @@ if __name__ == "__main__":
     )
     print_test_results("XGBoost", y_test, xgb_clf.predict(x_test))
 
+    print("Training neural network (MLP)...")
+    mlp_clf = train_neural_network(
+        train_df,
+        val_df,
+        target_column=TARGET_COLUMN,
+        param_grid={
+            "hidden_layer_sizes": [(64,), (128, 64)],
+            "alpha": [1e-4, 1e-3],
+            "learning_rate_init": [0.001],
+        },
+        scoring="f1",
+        verbose=True,
+        grid_n_jobs=1,
+    )
+    print_test_results("Neural network (MLP)", y_test, mlp_clf.predict(x_test))
+
     models: list[tuple[str, Any]] = [
         # ("Decision tree", tree_clf),
         # ("Naive Bayes", nb_clf),
-        ("K-nearest neighbors", knn_clf),
+        # ("K-nearest neighbors", knn_clf),
         ("Random forest", forest_clf),
         ("XGBoost", xgb_clf),
+        ("Neural network (MLP)", mlp_clf),
     ]
     pred_matrix = np.vstack(
         [clf.predict(x_test).astype(np.int64) for _, clf in models]
