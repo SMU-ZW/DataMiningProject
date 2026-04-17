@@ -1,10 +1,11 @@
-from sklearn.svm import SVC
 from sklearn.svm import LinearSVC
+import numpy as np
 
 from experiments.orion.config import DEFAULT_ORION_CONFIG
-from experiments.zhongjie.elib import load_zhongjie_training_frames
-from experiments.zhongjie.elib import evaluate_and_print_trade_zhongjie
-from lib.common.common import evaluate_and_print
+from experiments.zhongjie.elib import (
+    load_zhongjie_training_frames,
+    evaluate_and_print_trade_zhongjie,
+)
 
 
 def trade_profit_from_preds(
@@ -46,14 +47,17 @@ def main() -> None:
     x_test = test_df.drop(columns=["target"])
     y_test = test_df["target"]
 
-    c_values = [0.01, 0.1, 1.0, 5.0]
-    class_weights = [None, "balanced"]
-    thresholds = [-0.5, 0.0, 0.2, 0.5, 1.0]
+    c_values = [0.01, 0.02, 0.05]
+    class_weights = [None]
+    thresholds = [0.45, 0.48, 0.50, 0.52, 0.55]
+
+    min_validation_trades = 20
 
     best_profit = float("-inf")
     best_clf = None
-    best_threshold = 0.0
+    best_threshold = 0.5
     best_params = None
+    best_trade_count = 0
 
     for c in c_values:
         for cw in class_weights:
@@ -68,9 +72,22 @@ def main() -> None:
             clf.fit(x_train, y_train)
 
             val_scores = clf.decision_function(x_val)
+            print(
+                f"  score range: min={val_scores.min():.4f}, "
+                f"median={np.median(val_scores):.4f}, max={val_scores.max():.4f}"
+            )
 
             for thr in thresholds:
                 val_pred = (val_scores > thr).astype(int)
+                trade_count = int(val_pred.sum())
+
+                if trade_count < min_validation_trades:
+                    print(
+                        f"  threshold={thr}, trades={trade_count}, skipped "
+                        f"(below min_validation_trades={min_validation_trades})"
+                    )
+                    continue
+
                 profit = trade_profit_from_preds(
                     y_val,
                     val_pred,
@@ -79,15 +96,28 @@ def main() -> None:
                     cost=cfg.trade_cost,
                 )
 
+                print(
+                    f"  threshold={thr}, trades={trade_count}, "
+                    f"validation_profit={100 * profit:.2f}%"
+                )
+
                 if profit > best_profit:
                     best_profit = profit
                     best_clf = clf
                     best_threshold = thr
                     best_params = {"C": c, "class_weight": cw}
+                    best_trade_count = trade_count
+
+    if best_clf is None:
+        raise RuntimeError(
+            "No valid LinearSVC setup found. Try lowering min_validation_trades "
+            "or widening the threshold search."
+        )
 
     print("\nBest validation setup:")
     print(best_params)
     print(f"Best threshold: {best_threshold}")
+    print(f"Best validation trades: {best_trade_count}")
     print(f"Best validation profit: {100 * best_profit:.2f}%")
 
     test_scores = best_clf.decision_function(x_test)
@@ -101,6 +131,7 @@ def main() -> None:
         stop_loss=cfg.stop_loss,
         cost=cfg.trade_cost,
     )
+
 
 if __name__ == "__main__":
     main()
